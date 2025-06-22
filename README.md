@@ -1,4 +1,4 @@
-# 🔧 Controle de Bombas de Sucção 
+# 🔧 Controle de equipamentos
 
 Sistema desenvolvido com Streamlit + Supabase.
 
