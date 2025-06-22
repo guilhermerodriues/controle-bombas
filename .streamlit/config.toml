@@ -6,9 +6,7 @@ enableCORS = false
 [theme]
 base="dark"
 primaryColor="#1E90FF"
-backgroundColor="#0e1117"
-secondaryBackgroundColor="#262730"
-textColor="#FAFAFA"
+backgroundColor="#FFFFFF"
+secondaryBackgroundColor="#F9FAFB"
+textColor="#000000"
 font="sans serif"
-
-
