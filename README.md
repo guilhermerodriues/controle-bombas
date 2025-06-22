@@ -1,4 +1,4 @@
-# 🔧 Controle de Bombas de Sucção - Suplen Médical
+# 🔧 Controle de Bombas de Sucção 
 
 Sistema desenvolvido com Streamlit + Supabase.
 
