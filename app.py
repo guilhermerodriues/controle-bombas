@@ -447,6 +447,7 @@ def get_dashboard_metrics(filial=None):
             "em_manutencao": em_manutencao,
             "ulta_count": ulta_count,
             "activac_count": activac_count,
+            "total_bombas": total_bombas_inventario,
             "status_counts": {"No Prazo": 0, "Menos de 7 dias": 0, "Fora Prazo": 0, "Indefinido": 0, "Data Inválida": 0},
             "hosp_counts": {},
             "bombas_por_filial": {"BRASILIA": 0, "GOIANIA": 0, "CUIABA": 0}
