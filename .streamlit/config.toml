@@ -5,9 +5,10 @@ enableCORS = false
 
 [theme]
 base="dark"
-primaryColor="#00FF00"
-backgroundColor="#000000"
-secondaryBackgroundColor="#0a0a0a"
-textColor="#00FF00"
-font="monospace"
+primaryColor="#1E90FF"
+backgroundColor="#0e1117"
+secondaryBackgroundColor="#262730"
+textColor="#FAFAFA"
+font="sans serif"
+
 
