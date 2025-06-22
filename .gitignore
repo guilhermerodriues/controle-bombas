@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Ambiente virtual
+venv/
+.venv/
+ENV/
+env/
+
+# Secrets
+.env
+.streamlit/secrets.toml
+
+# Arquivos temporários
+*.db
+*.sqlite3
+*.log
+*.tmp
+*.bak
+*.zip
+*.tar.gz
+*.tar
+*.rar
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Build
+build/
+dist/
+*.spec
+
+# Config local
+config.json

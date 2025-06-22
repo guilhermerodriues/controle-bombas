@@ -1,0 +1,13 @@
+streamlit
+pandas
+matplotlib
+plotly
+folium
+streamlit-folium
+python-dotenv
+supabase
+docx
+python-docx
+PyPDF2
+docx2pdf
+openpyxl
