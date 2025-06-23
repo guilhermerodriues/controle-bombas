@@ -498,6 +498,23 @@ def get_dashboard_metrics(filial=None):
         # Contagem por filial para o mapa (sempre global)
         bombas_por_filial = active_pumps_df['filial'].apply(normalize_text).value_counts().to_dict() if not active_pumps_df.empty else {}
         
+        # CÁLCULO PARA O NOVO GRÁFICO: Modelos por Filial (SEMPRE GLOBAL)
+        modelos_por_filial_records = []
+        if not active_pumps_df.empty and not dados_bombas_df.empty:
+            active_pumps_df['Serial_Normalized'] = active_pumps_df['serial'].apply(normalize_text)
+            
+            merged_global_df = pd.merge(
+                active_pumps_df,
+                dados_bombas_df[['Serial_Normalized', 'Modelo']],
+                on='Serial_Normalized',
+                how='left'
+            )
+            
+            if not merged_global_df.empty and 'filial' in merged_global_df.columns and 'Modelo' in merged_global_df.columns:
+                merged_global_df.dropna(subset=['filial', 'Modelo'], inplace=True)
+                modelos_por_filial_df = merged_global_df.groupby(['filial', 'Modelo']).size().reset_index(name='Quantidade')
+                modelos_por_filial_records = modelos_por_filial_df.to_dict('records')
+
         # --- Montagem final das métricas ---
         metrics = {
             "ativas": total_comodato_painel,
@@ -508,7 +525,8 @@ def get_dashboard_metrics(filial=None):
             "total_bombas": total_bombas_inventario,
             "status_counts": {**{"No Prazo": 0, "Menos de 7 dias": 0, "Fora Prazo": 0}, **status_counts},
             "hosp_counts": hosp_counts,
-            "bombas_por_filial": {**{"BRASILIA": 0, "GOIANIA": 0, "CUIABA": 0}, **bombas_por_filial}
+            "bombas_por_filial": {**{"BRASILIA": 0, "GOIANIA": 0, "CUIABA": 0}, **bombas_por_filial},
+            "modelos_por_filial": modelos_por_filial_records
         }
         
         logging.info("Métricas do dashboard carregadas com lógica otimizada.")
@@ -962,6 +980,8 @@ def main():
             st.markdown("#### Bombas em Comodato por Hospital")
             df_hosp = pd.DataFrame(list(metrics["hosp_counts"].items()), columns=['hospital', 'count'])
             if not df_hosp.empty:
+                # Substitui nomes de hospitais vazios por um rótulo descritivo
+                df_hosp['hospital'] = df_hosp['hospital'].replace('', 'HOSPITAL NÃO ESPECIFICADO')
                 df_hosp['hospital_label'] = df_hosp['hospital'].apply(lambda x: x[:30] + '...' if len(x) > 30 else x)
                 fig_bar = px.bar(
                     df_hosp.sort_values('count', ascending=False).head(15), 
@@ -1021,6 +1041,8 @@ def main():
             st.markdown("##### Distribuição por Hospital")
             df_hosp_global = pd.DataFrame(list(metrics["hosp_counts"].items()), columns=['hospital', 'count'])
             if not df_hosp_global.empty:
+                # Substitui nomes de hospitais vazios por um rótulo descritivo
+                df_hosp_global['hospital'] = df_hosp_global['hospital'].replace('', 'HOSPITAL NÃO ESPECIFICADO')
                 df_hosp_global['hospital_label'] = df_hosp_global['hospital'].apply(lambda x: x[:30] + '...' if len(x) > 30 else x)
                 fig_bar_global = px.bar(
                     df_hosp_global.sort_values('count', ascending=False).head(15), 
@@ -1104,6 +1126,36 @@ def main():
             legend_html += "</div>"
             st.markdown(legend_html, unsafe_allow_html=True)
             
+        st.markdown("---")
+
+        st.markdown("### Total de Bombas por Modelo em Cada Filial")
+        if metrics.get("modelos_por_filial"):
+            df_modelos_filial = pd.DataFrame(metrics["modelos_por_filial"])
+            if not df_modelos_filial.empty:
+                df_modelos_filial = df_modelos_filial.sort_values(by=['filial', 'Modelo'])
+                fig_modelos_filial = px.bar(
+                    df_modelos_filial, 
+                    x='filial', 
+                    y='Quantidade', 
+                    color='Modelo', 
+                    title='Distribuição de Modelos de Bombas por Filial', 
+                    barmode='group', 
+                    text_auto=True,
+                    template='plotly_dark',
+                    labels={'filial': 'Filial', 'Quantidade': 'Nº de Bombas', 'Modelo': 'Modelo da Bomba'},
+                    color_discrete_sequence=px.colors.qualitative.Vivid
+                )
+                fig_modelos_filial.update_layout(
+                    xaxis_title="Filial",
+                    yaxis_title="Total de Bombas",
+                    legend_title_text='Modelo'
+                )
+                st.plotly_chart(fig_modelos_filial, use_container_width=True)
+            else:
+                st.info("Não há dados de modelos por filial para exibir.")
+        else:
+            st.info("Métricas de modelos por filial não disponíveis.")
+
         st.markdown('<h2 class="section-title">Análise de Curativos</h2>', unsafe_allow_html=True)
         with st.spinner("Carregando análise de curativos..."):
             curativo_results = analyze_curativo()
