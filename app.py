@@ -16,7 +16,8 @@ import unicodedata
 from supabase import create_client, Client
 from dotenv import load_dotenv
 from analyze_curativo import analyze_curativo
-from docx2pdf import convert
+
+# A importação incorreta de 'docx2pdf' foi REMOVIDA daqui.
 
 # Carregar variáveis de ambiente
 load_dotenv()
@@ -480,18 +481,15 @@ def get_dashboard_metrics(filial=None):
 # -------------------- GERAÇÃO DE DOCUMENTOS --------------------
 def convert_docx_to_pdf(docx_path, pdf_path):
     try:
-        # A biblioteca docx2pdf não é compatível com Linux sem MS Office.
-        # Trocamos para 'docx-to-pdf', que usa LibreOffice em Linux.
-        # É necessário instalar a biblioteca: pip install docx-to-pdf
-        # E garantir que o LibreOffice esteja no ambiente: sudo apt-get install libreoffice
+        # Importa a biblioteca correta, que usa LibreOffice no Linux
         from docx2pdf import convert
         convert(docx_path, pdf_path)
         logging.info(f"Convertido '{docx_path}' -> '{pdf_path}'")
         return True
     except Exception as e:
-        logging.error(f"Erro na conversão DOCX -> PDF: {e}")
-        # A mensagem de erro é mais explícita sobre a real necessidade em Linux.
-        st.warning(f"Erro ao converter para PDF. Em ambientes Linux, é necessário ter o LibreOffice instalado. Detalhe do erro: {e}")
+        logging.error(f"Erro na conversão DOCX -> PDF com 'docxtopdf': {e}")
+        # A mensagem de erro agora é mais útil
+        st.warning(f"Erro ao converter para PDF. Verifique se o LibreOffice foi instalado corretamente no servidor. Detalhe do erro: {e}")
         return False
 
 def generate_combined_pdf(bomba_data):
