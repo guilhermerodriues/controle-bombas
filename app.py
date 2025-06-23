@@ -1233,7 +1233,7 @@ def main():
             tab_edit, tab_pdf, tab_anexar_nf, tab_download_nf = st.tabs(["📝 Editar Bomba", "🖨️ Gerar Documentos", "📎 Anexar NF Assinada", "📥 Baixar NF Assinada"])
             with tab_edit:
                 st.subheader("Editar Dados da Bomba")
-                bomba_to_edit = st.selectbox("Selecione uma bomba para editar:", options=bombas_ativas, format_func=lambda b: f"SERIAL: {b.get('serial', 'N/A')} | PACIENTE: {b.get('paciente', 'N/A')}", key="edit_bomba_select", index=None, placeholder="Selecione uma bomba...")
+                bomba_to_edit = st.selectbox("Selecione uma bomba para editar:", options=bombas_ativas, format_func=lambda b: f"SERIAL: {b.get('serial', 'N/A')} | PACIENTE: {b.get('paciente', 'N/A')} | NF: {b.get('nf', 'N/A')}", key="edit_bomba_select", index=None, placeholder="Selecione uma bomba...")
                 if bomba_to_edit:
                     with st.form(key=f"edit_form_{bomba_to_edit['id']}"):
                         try:
@@ -1275,7 +1275,7 @@ def main():
                                         st.error(f"Ocorreu um erro ao salvar as alterações: {e}")
             with tab_pdf:
                 st.subheader("Gerar PDF do Contrato")
-                bomba_pdf = st.selectbox("Selecione uma bomba:", bombas_ativas, format_func=lambda b: f"SERIAL: {b.get('serial', 'N/A')} | PACIENTE: {b.get('paciente', 'N/A')}", key="pdf_bomba_select", index=None, placeholder="Selecione uma bomba...")
+                bomba_pdf = st.selectbox("Selecione uma bomba:", bombas_ativas, format_func=lambda b: f"SERIAL: {b.get('serial', 'N/A')} | PACIENTE: {b.get('paciente', 'N/A')} | NF: {b.get('nf', 'N/A')}", key="pdf_bomba_select", index=None, placeholder="Selecione uma bomba...")
                 if bomba_pdf:
                     if st.button("Gerar e Baixar PDF", key="generate_pdf_button"):
                         with st.spinner("Gerando PDF... Esta operação pode ser demorada."):
@@ -1305,7 +1305,7 @@ def main():
                 if not bombas_sem_nf:
                     st.info("Todas as bombas nesta listagem já possuem NF assinada.")
                 else:
-                    bomba_anexar = st.selectbox("Selecione a bomba para anexar a NF:", bombas_sem_nf, format_func=lambda b: f"SERIAL: {b.get('serial', 'N/A')} | PACIENTE: {b.get('paciente', 'N/A')}", key="anexar_nf_select")
+                    bomba_anexar = st.selectbox("Selecione a bomba para anexar a NF:", bombas_sem_nf, format_func=lambda b: f"SERIAL: {b.get('serial', 'N/A')} | PACIENTE: {b.get('paciente', 'N/A')} | NF: {b.get('nf', 'N/A')}", key="anexar_nf_select")
                     nf_file = st.file_uploader("Anexar PDF da NF assinada", type=["pdf"], key="nf_assinada_upload")
                     if st.button("Enviar NF Assinada", disabled=(not bomba_anexar or not nf_file)):
                         with st.spinner("Enviando NF..."):
@@ -1321,7 +1321,7 @@ def main():
                 if not bombas_com_nf:
                     st.info("Nenhuma bomba nesta listagem possui NF assinada para download.")
                 else:
-                    bomba_selecionada = st.selectbox("Selecione a bomba para baixar a NF:", bombas_com_nf, format_func=lambda b: f"SERIAL: {b.get('serial', 'N/A')} | PACIENTE: {b.get('paciente', 'N/A')}", key="download_nf_select")
+                    bomba_selecionada = st.selectbox("Selecione a bomba para baixar a NF:", bombas_com_nf, format_func=lambda b: f"SERIAL: {b.get('serial', 'N/A')} | PACIENTE: {b.get('paciente', 'N/A')} | NF: {b.get('nf', 'N/A')}", key="download_nf_select")
                     if st.button("Baixar NF Assinada", key="baixar_nf_button_tab", disabled=not bomba_selecionada):
                         with st.spinner("Preparando download..."):
                             nf_data = download_nf_assinada(bomba_selecionada['serial'])
@@ -1339,7 +1339,7 @@ def main():
             st.info("Nenhuma bomba ativa encontrada com este critério de busca.")
         else:
             with st.form("devolver_form"):
-                bomba = st.selectbox("Selecione a bomba a devolver:", bombas_ativas, format_func=lambda b: f"SERIAL: {b.get('serial', 'N/A')} - PACIENTE: {b.get('paciente', 'N/A')}", index=None, placeholder="Selecione uma bomba...")
+                bomba = st.selectbox("Selecione a bomba a devolver:", bombas_ativas, format_func=lambda b: f"SERIAL: {b.get('serial', 'N/A')} | PACIENTE: {b.get('paciente', 'N/A')} | NF: {b.get('nf', 'N/A')}", index=None, placeholder="Selecione uma bomba...")
                 data_retorno = st.date_input("📅 Data de Retorno", value=datetime.now(), format="DD/MM/YYYY")
                 nf_devolucao = st.text_input("🧾 NF de Devolução*", placeholder="Ex.: 987654").upper()
                 submitted = st.form_submit_button("Confirmar Devolução")
