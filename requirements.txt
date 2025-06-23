@@ -9,7 +9,7 @@ supabase
 docx
 python-docx
 PyPDF2
-docx2pdf
+docx-to-pdf
 openpyxl
 xlsxwriter
 

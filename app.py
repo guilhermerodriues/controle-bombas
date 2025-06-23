@@ -1,4 +1,3 @@
-
 import streamlit as st
 import json
 import os
@@ -17,6 +16,7 @@ import unicodedata
 from supabase import create_client, Client
 from dotenv import load_dotenv
 from analyze_curativo import analyze_curativo
+from docx2pdf import convert
 
 # Carregar variáveis de ambiente
 load_dotenv()
@@ -480,17 +480,18 @@ def get_dashboard_metrics(filial=None):
 # -------------------- GERAÇÃO DE DOCUMENTOS --------------------
 def convert_docx_to_pdf(docx_path, pdf_path):
     try:
-        if sys.platform == "win32":
-            import pythoncom
-            pythoncom.CoInitialize()
-        
-        from docx2pdf import convert
+        # A biblioteca docx2pdf não é compatível com Linux sem MS Office.
+        # Trocamos para 'docx-to-pdf', que usa LibreOffice em Linux.
+        # É necessário instalar a biblioteca: pip install docx-to-pdf
+        # E garantir que o LibreOffice esteja no ambiente: sudo apt-get install libreoffice
+        from docx_to_pdf import convert
         convert(docx_path, pdf_path)
         logging.info(f"Convertido '{docx_path}' -> '{pdf_path}'")
         return True
     except Exception as e:
         logging.error(f"Erro na conversão DOCX -> PDF: {e}")
-        st.warning(f"Erro ao converter para PDF: {e}")
+        # A mensagem de erro é mais explícita sobre a real necessidade em Linux.
+        st.warning(f"Erro ao converter para PDF. Em ambientes Linux, é necessário ter o LibreOffice instalado. Detalhe do erro: {e}")
         return False
 
 def generate_combined_pdf(bomba_data):
@@ -1003,8 +1004,13 @@ def main():
                     active_filials.append((filial_map, count))
             st_folium(m, width=800, height=400)
         with col2:
-            st.markdown("### Legenda")
-            legend_html = "<div>"
+            # --- INÍCIO DA CORREÇÃO ---
+            # Envolvemos a legenda em um único bloco de markdown com um contêiner flexível.
+            # O spacer div com 'flex-grow: 1' empurrará todo o conteúdo para cima.
+            legend_html = """
+            <div style="height: 100%; display: flex; flex-direction: column;">
+                <h3>Legenda</h3>
+            """
             items_added = False
             for filial_map, color in colors.items():
                 normalized_filial = normalize_text(filial_map)
@@ -1012,10 +1018,14 @@ def main():
                 if display_count > 0:
                     items_added = True
                     legend_html += (f'<div class="legend-item"><span class="legend-dot" style="background-color: {color};"></span>{filial_map}: {display_count} bombas</div>')
+            
             if not items_added:
                 legend_html += "<div>Nenhuma bomba em comodato registrada.</div>"
-            legend_html += "</div>"
+            
+            legend_html += "<div style='flex-grow: 1;'></div></div>" # Este div empurra o conteúdo para cima
+            
             st.markdown(legend_html, unsafe_allow_html=True)
+            # --- FIM DA CORREÇÃO ---
             
         st.markdown('<h2 class="section-title">Análise de Curativos</h2>', unsafe_allow_html=True)
         with st.spinner("Carregando análise de curativos..."):
