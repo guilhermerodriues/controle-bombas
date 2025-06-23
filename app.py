@@ -16,6 +16,7 @@ import unicodedata
 from supabase import create_client, Client
 from dotenv import load_dotenv
 from analyze_curativo import analyze_curativo
+import subprocess
 
 # A importação incorreta de 'docx2pdf' foi REMOVIDA daqui.
 
@@ -479,32 +480,47 @@ def get_dashboard_metrics(filial=None):
         return None
 
 # -------------------- GERAÇÃO DE DOCUMENTOS --------------------
-def convert_docx_to_pdf(docx_path, pdf_path):
+def convert_docx_to_pdf(docx_path: str, pdf_path: str) -> bool:
     """
-    Converte um arquivo DOCX para PDF usando o LibreOffice no servidor.
+    Converte .docx para .pdf usando o CLI do LibreOffice (soffice).
     """
     try:
-        # A biblioteca docx2pdf vai procurar pelo LibreOffice instalado no sistema.
-        from docx2pdf import convert
-        
-        print(f"Iniciando conversão de {docx_path} para {pdf_path}...")
-        convert(docx_path, pdf_path)
-        print(f"Arquivo convertido com sucesso: {pdf_path}")
-        logging.info(f"Convertido '{docx_path}' -> '{pdf_path}'")
+        # garante que o diretório de saída exista
+        out_dir = os.path.dirname(pdf_path) or "."
+        os.makedirs(out_dir, exist_ok=True)
+
+        # converte para PDF
+        cmd = [
+            "soffice",
+            "--headless",
+            "--convert-to", "pdf",
+            "--outdir", out_dir,
+            docx_path
+        ]
+        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+        # o LibreOffice nomeia o .pdf igual ao .docx
+        converted = os.path.join(out_dir,
+                                 os.path.splitext(os.path.basename(docx_path))[0] + ".pdf")
+        if not os.path.exists(converted):
+            raise FileNotFoundError(f"PDF gerado não encontrado: {converted}")
+
+        # renomeia/move para o caminho final, se necessário
+        if os.path.abspath(converted) != os.path.abspath(pdf_path):
+            os.replace(converted, pdf_path)
+
+        logging.info(f"Convertido: {docx_path} → {pdf_path}")
         return True
+
+    except subprocess.CalledProcessError as e:
+        err = e.stderr.decode()
+        logging.error(f"soffice erro: {err}")
+        st.warning(f"Erro ao converter DOCX→PDF:\n{err}")
     except Exception as e:
-        # Se a conversão falhar, o erro provavelmente é a ausência do LibreOffice.
-        error_message = str(e)
-        logging.error(f"Erro na conversão DOCX -> PDF com 'docx2pdf': {error_message}")
-        
-        # Exibe um aviso útil para o usuário.
-        st.error(
-            "Falha ao gerar o arquivo PDF. "
-            "Isso geralmente ocorre porque o LibreOffice não está instalado no servidor. "
-            "Se este erro persistir, adicione 'libreoffice-writer' ao seu arquivo packages.txt."
-        )
-        st.info(f"Detalhe técnico do erro: {error_message}")
-        return False
+        logging.error(f"Erro na conversão genérica: {e}")
+        st.warning(f"Erro ao converter para PDF: {e}")
+
+    return False
 
 def generate_combined_pdf(bomba_data):
     try:
@@ -545,6 +561,7 @@ def generate_combined_pdf(bomba_data):
         temp_pdf_path = os.path.join(tempfile.gettempdir(), f"contrato_{bomba_data['serial']}.pdf")
         if not convert_docx_to_pdf(temp_docx_path, temp_pdf_path):
             os.remove(temp_docx_path)
+            st.error("Falha na conversão: verifique se o LibreOffice está instalado (packages.txt) e acessível como `soffice`.")
             return None
 
         merger = PdfMerger()
