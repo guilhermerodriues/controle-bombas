@@ -480,16 +480,30 @@ def get_dashboard_metrics(filial=None):
 
 # -------------------- GERAÇÃO DE DOCUMENTOS --------------------
 def convert_docx_to_pdf(docx_path, pdf_path):
+    """
+    Converte um arquivo DOCX para PDF usando o LibreOffice no servidor.
+    """
     try:
-        # Importa a biblioteca correta, que usa LibreOffice no Linux
+        # A biblioteca docx2pdf vai procurar pelo LibreOffice instalado no sistema.
         from docx2pdf import convert
+        
+        print(f"Iniciando conversão de {docx_path} para {pdf_path}...")
         convert(docx_path, pdf_path)
+        print(f"Arquivo convertido com sucesso: {pdf_path}")
         logging.info(f"Convertido '{docx_path}' -> '{pdf_path}'")
         return True
     except Exception as e:
-        logging.error(f"Erro na conversão DOCX -> PDF com 'docxtopdf': {e}")
-        # A mensagem de erro agora é mais útil
-        st.warning(f"Erro ao converter para PDF. Verifique se o LibreOffice foi instalado corretamente no servidor. Detalhe do erro: {e}")
+        # Se a conversão falhar, o erro provavelmente é a ausência do LibreOffice.
+        error_message = str(e)
+        logging.error(f"Erro na conversão DOCX -> PDF com 'docx2pdf': {error_message}")
+        
+        # Exibe um aviso útil para o usuário.
+        st.error(
+            "Falha ao gerar o arquivo PDF. "
+            "Isso geralmente ocorre porque o LibreOffice não está instalado no servidor. "
+            "Se este erro persistir, adicione 'libreoffice-writer' ao seu arquivo packages.txt."
+        )
+        st.info(f"Detalhe técnico do erro: {error_message}")
         return False
 
 def generate_combined_pdf(bomba_data):
