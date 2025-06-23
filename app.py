@@ -484,7 +484,7 @@ def convert_docx_to_pdf(docx_path, pdf_path):
         # Trocamos para 'docx-to-pdf', que usa LibreOffice em Linux.
         # É necessário instalar a biblioteca: pip install docx-to-pdf
         # E garantir que o LibreOffice esteja no ambiente: sudo apt-get install libreoffice
-        from docx_to_pdf import convert
+        from docx2pdf import convert
         convert(docx_path, pdf_path)
         logging.info(f"Convertido '{docx_path}' -> '{pdf_path}'")
         return True
