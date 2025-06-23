@@ -6,10 +6,8 @@ folium
 streamlit-folium
 python-dotenv
 supabase
-docx
 python-docx
 PyPDF2
 docx-to-pdf
 openpyxl
 xlsxwriter
-
