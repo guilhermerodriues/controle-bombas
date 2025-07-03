@@ -1171,6 +1171,9 @@ def main():
                 # Garante que a Data_Validad seja tratada corretamente
                 if 'Data_Validad' in df_para_exibir.columns:
                     df_para_exibir['Data_Validad'] = pd.to_datetime(df_para_exibir['Data_Validad'], errors='coerce')
+                    # Remove duplicatas considerando apenas as colunas que identificam um registro físico único
+                    df_para_exibir = df_para_exibir.drop_duplicates(subset=['Produto', 'Desc_Produto', 'Referencia', 'Lote', 'Data_Validad'], keep='last')
+                    # Ordena por data de validade e descrição
                     df_para_exibir = df_para_exibir.sort_values(by=['Data_Validad', 'Desc_Produto'])
                     colunas_exibir = ['Produto', 'Desc_Produto', 'Referencia', 'Lote', 'Data_Validad', 'Saldo_Lote']
                     df_display = df_para_exibir[colunas_exibir].copy()
