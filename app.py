@@ -403,12 +403,47 @@ def get_historico_devolvidas(filial=None):
 @st.cache_data(ttl=300, show_spinner="Carregando dados de curativos...")
 def get_saldo_curativo_data():
     try:
+        # Busca todos os dados do banco
         response = supabase.table("saldo_curativo").select("*").execute()
         data = response.data
         if not data:
             return pd.DataFrame()
+            
+        # Converte para DataFrame
         df = pd.DataFrame(data)
-        return df
+        total_registros = len(df)
+        
+        # Identifica duplicatas baseado em todas as colunas relevantes
+        df_sem_duplicatas = df.drop_duplicates(
+            subset=['Produto', 'Desc_Produto', 'Referencia', 'Lote', 'Data_Validad', 'Saldo_Lote']
+        )
+        registros_unicos = len(df_sem_duplicatas)
+        
+        # Se encontrou duplicatas, mostra informação
+        if total_registros > registros_unicos:
+            duplicatas = total_registros - registros_unicos
+            st.sidebar.warning(f"""
+                ⚠️ Atenção: Foram encontradas duplicatas no banco
+                - Total de registros: {total_registros}
+                - Registros únicos: {registros_unicos}
+                - Duplicatas removidas: {duplicatas}
+            """)
+            
+            # Mostra as linhas que estão duplicadas
+            linhas_duplicadas = df[df.duplicated(
+                subset=['Produto', 'Desc_Produto', 'Referencia', 'Lote', 'Data_Validad', 'Saldo_Lote'],
+                keep=False
+            )]
+            if not linhas_duplicadas.empty:
+                with st.sidebar.expander("Ver registros duplicados"):
+                    st.dataframe(
+                        linhas_duplicadas.sort_values(by=['Produto', 'Lote']),
+                        use_container_width=True
+                    )
+        
+        # Retorna o DataFrame sem duplicatas
+        return df_sem_duplicatas
+        
     except Exception as e:
         logging.error(f"Erro ao carregar dados da tabela saldo_curativo: {e}")
         st.error(f"Não foi possível carregar os dados de saldo de curativos: {e}")
@@ -1160,26 +1195,49 @@ def main():
             if search_term:
                 df_para_exibir = df_para_exibir[df_para_exibir['Desc_Produto'].str.contains(search_term, case=False, na=False)]
             if not df_para_exibir.empty:
-                df_para_exibir['Data_Validad'] = pd.to_datetime(df_para_exibir['Data_Validad'], errors='coerce')
-                df_para_exibir.dropna(subset=['Data_Validad'], inplace=True)
-                
-                # Agrupar por Desc_Produto, Referencia, Lote e Data de Validade, somando os saldos
-                df_grouped = df_para_exibir.groupby(['Desc_Produto', 'Referencia', 'Lote', 'Data_Validad']).agg({
-                    'Produto': 'first',  # Pega o primeiro valor
-                    'Saldo_Lote': 'sum'  # Soma todos os saldos
-                }).reset_index()
-                
-                df_grouped = df_grouped.sort_values(by=['Data_Validad', 'Desc_Produto'])
-                df_display = df_grouped[['Produto', 'Desc_Produto', 'Referencia', 'Lote', 'Data_Validad', 'Saldo_Lote']].copy()
-                df_display.rename(columns={'Desc_Produto': 'Descrição do Produto', 'Referencia': 'Referência', 'Data_Validad': 'Data de Validade', 'Saldo_Lote': 'Saldo do Lote'}, inplace=True)
+                # Garante que a Data_Validad seja tratada corretamente
+                if 'Data_Validad' in df_para_exibir.columns:
+                    df_para_exibir['Data_Validad'] = pd.to_datetime(df_para_exibir['Data_Validad'], errors='coerce')
+                    df_para_exibir = df_para_exibir.sort_values(by=['Data_Validad', 'Desc_Produto'])
+                    colunas_exibir = ['Produto', 'Desc_Produto', 'Referencia', 'Lote', 'Data_Validad', 'Saldo_Lote']
+                    df_display = df_para_exibir[colunas_exibir].copy()
+                    df_display.rename(columns={
+                        'Desc_Produto': 'Descrição do Produto',
+                        'Referencia': 'Referência',
+                        'Data_Validad': 'Data de Validade',
+                        'Saldo_Lote': 'Saldo do Lote'
+                    }, inplace=True)
+                else:
+                    # Se não tem coluna Data_Validad, ordenar só por Desc_Produto
+                    df_para_exibir = df_para_exibir.sort_values(by=['Desc_Produto'])
+                    colunas_exibir = ['Produto', 'Desc_Produto', 'Referencia', 'Lote', 'Saldo_Lote']
+                    df_display = df_para_exibir[colunas_exibir].copy()
+                    df_display.rename(columns={
+                        'Desc_Produto': 'Descrição do Produto',
+                        'Referencia': 'Referência',
+                        'Saldo_Lote': 'Saldo do Lote'
+                    }, inplace=True)
                 def style_validade(row):
-                    hoje = datetime.now()
-                    diferenca_dias = (row['Data de Validade'] - hoje).days if pd.notna(row['Data de Validade']) else -999
-                    bg_color = 'background-color: #F08080;'
-                    if diferenca_dias > 90: bg_color = 'background-color: #90ee90;'
-                    elif 60 <= diferenca_dias <= 90: bg_color = 'background-color: #FFD580;'
-                    return [f"color: black; {bg_color}"] * len(row)
-                styler = df_display.style.apply(style_validade, axis=1).format({'Data de Validade': '{:%d/%m/%Y}'})
+                    if 'Data de Validade' in row.index:
+                        hoje = datetime.now()
+                        if pd.notna(row['Data de Validade']):
+                            diferenca_dias = (row['Data de Validade'] - hoje).days
+                            bg_color = 'background-color: #F08080;'  # Crítico (< 2 meses)
+                            if diferenca_dias > 90:
+                                bg_color = 'background-color: #90ee90;'  # Normal
+                            elif 60 <= diferenca_dias <= 90:
+                                bg_color = 'background-color: #FFD580;'  # Atenção
+                            return [f"color: black; {bg_color}"] * len(row)
+                    return [''] * len(row)  # Sem estilo para linhas sem data de validade
+
+                if 'Data de Validade' in df_display.columns:
+                    styler = df_display.style.apply(style_validade, axis=1).format({
+                        'Data de Validade': lambda x: x.strftime('%d/%m/%Y') if pd.notnull(x) else '',
+                        'Saldo do Lote': '{:.0f}'
+                    })
+                else:
+                    styler = df_display.style.format({'Saldo do Lote': '{:.0f}'})
+                    
                 st.dataframe(styler, use_container_width=True, hide_index=True)
                 excel_data = generate_excel_saldo_curativo(styler.data)
                 if excel_data:
