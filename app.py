@@ -18,6 +18,9 @@ from dotenv import load_dotenv
 from analyze_curativo import analyze_curativo
 import subprocess
 
+
+
+
 # A importação incorreta de 'docx2pdf' foi REMOVIDA daqui.
 
 # Carregar variáveis de ambiente
@@ -120,6 +123,24 @@ def normalize_text(text):
         return ""
     return unicodedata.normalize('NFKD', text).encode('ASCII', 'ignore').decode('ASCII').upper().strip()
 
+# --- INÍCIO DA NOVA FUNÇÃO CENTRALIZADA PARA DATAS ---
+def parse_supabase_date(date_string: str | None) -> datetime | None:
+    """
+    Converte com segurança uma string de data do Supabase para um objeto datetime,
+    lidando com o sufixo 'Z' para compatibilidade entre versões do Python.
+    """
+    if not date_string or not isinstance(date_string, str):
+        return None
+    try:
+        # Garante compatibilidade com Python < 3.11 que não lida com 'Z' nativamente
+        if date_string.endswith('Z'):
+            date_string = date_string[:-1] + '+00:00'
+        return datetime.fromisoformat(date_string)
+    except (ValueError, TypeError):
+        logging.warning(f"Não foi possível converter a string de data: {date_string}")
+        return None
+# --- FIM DA NOVA FUNÇÃO ---
+
 # Dicionário de senhas para filiais
 FILIAIS_PASSWORDS = {filial: normalize_text(filial) + "123" for filial in FILIAIS}
 
@@ -150,7 +171,6 @@ def download_file_from_storage(storage_path):
         logging.info(f"Arquivo {storage_path} baixado com sucesso.")
         return response
     except Exception as e:
-        # Trata o erro de "Object not found" de forma silenciosa
         if "Object not found" in str(e):
             logging.warning(f"Arquivo não encontrado no storage: {storage_path}")
             return None
@@ -165,13 +185,10 @@ def get_dados_bombas_df():
         if not data:
             logging.warning("A tabela DADOS_BOMBAS está vazia ou não foi encontrada.")
             return pd.DataFrame(columns=['Serial', 'Modelo', 'Ultima_Manut', 'Venc_Manut'])
-
         df = pd.DataFrame(data)
         df['Serial_Normalized'] = df['Serial'].apply(normalize_text)
-        
         df['Ultima_Manut'] = pd.to_datetime(df['Ultima_Manut'], errors='coerce')
         df['Venc_Manut'] = pd.to_datetime(df['Venc_Manut'], errors='coerce')
-
         logging.info("Dados da tabela DADOS_BOMBAS (tipo DATE) carregados com sucesso.")
         return df
     except Exception as e:
@@ -204,14 +221,12 @@ def setup_filial():
             st.session_state.general_mode = False
             st.rerun()
         return config["filial"]
-
     if "show_filial" not in st.session_state:
         st.session_state.show_filial = True
     if "show_general" not in st.session_state:
         st.session_state.show_general = False
     if "general_mode" not in st.session_state:
         st.session_state.general_mode = False
-
     st.sidebar.header("Configuração Inicial")
     if st.session_state.show_filial:
         filial = st.sidebar.selectbox("Selecione a Filial", FILIAIS, key="filial_select")
@@ -230,7 +245,6 @@ def setup_filial():
             st.session_state.show_filial = False
             st.session_state.show_general = True
             st.rerun()
-
     if st.session_state.show_general:
         general_pwd = st.sidebar.text_input("Senha para Dashboard Geral", type="password", key="general_pwd")
         if st.sidebar.button("Acessar Dashboard Geral", key="access_general"):
@@ -247,7 +261,6 @@ def setup_filial():
             st.session_state.show_general = False
             st.session_state.general_mode = False
             st.rerun()
-
     if st.session_state.get("general_mode", False):
         if st.sidebar.button("Sair do Dashboard Geral", key="exit_general"):
             if os.path.exists(CONFIG_FILE):
@@ -257,29 +270,30 @@ def setup_filial():
             st.session_state.show_general = False
             st.session_state.general_mode = False
             st.rerun()
-    
     return None if st.session_state.get("general_mode", False) else config.get("filial")
 
 # -------------------- LÓGICA DE DADOS OTIMIZADA --------------------
 def calculate_status(data_saida, periodo):
+    logging.info(f"Calculando status com data_saida: {data_saida} (tipo: {type(data_saida)}) e periodo: {periodo} (tipo: {type(periodo)})")
     if not data_saida or not periodo:
         return "Indefinido"
     try:
-        # A data já vem como objeto date/datetime, não precisa de strptime
         data_devolucao = data_saida + timedelta(days=int(periodo))
-        dias_restantes = (data_devolucao - datetime.now()).days
+        # ### CORREÇÃO PRINCIPAL ###
+        # Compara data com data, usando .date() para remover a informação de hora
+        dias_restantes = (data_devolucao - datetime.now().date()).days
         if dias_restantes < 0:
             return "Fora Prazo"
         elif dias_restantes <= 7:
             return "Menos de 7 dias"
         return "No Prazo"
-    except (ValueError, TypeError):
+    except (ValueError, TypeError) as e:
+        logging.error(f"Erro em calculate_status: {e}")
         return "Data Inválida"
 
 def register_event(table, record_id, description, filial):
     if "event_buffer" not in st.session_state:
         st.session_state.event_buffer = []
-    
     st.session_state.event_buffer.append({
         "data_evento": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "descricao": description.upper(),
@@ -305,32 +319,22 @@ def get_bombas(search_term="", filial=None, active_only=True):
         if filial:
             query = query.eq("filial", filial)
         bombas = query.execute().data
-        
         if not bombas:
             return []
-
-        # Filtro em Python mantido para corresponder à lógica original de busca em múltiplos campos
         if search_term:
             result = []
             search_term_lower = search_term.lower()
             for bomba in bombas:
-                if any(
-                    search_term_lower in str(bomba.get(field, "")).lower()
-                    for field in ["serial", "paciente", "hospital"]
-                ):
+                if any(search_term_lower in str(bomba.get(field, "")).lower() for field in ["serial", "paciente", "hospital"]):
                     result.append(bomba)
             bombas = result
-
-        # Formatação de datas
         for bomba in bombas:
             bomba["id"] = str(bomba["id"])
             for field in ["data_saida", "data_registro", "data_retorno"]:
-                if bomba.get(field):
-                    try:
-                        bomba[field] = datetime.fromisoformat(bomba[field]).strftime("%d/%m/%Y")
-                    except (ValueError, TypeError):
-                        pass # Mantém o valor original se não for uma data válida
-
+                # --- USO DA NOVA FUNÇÃO DE DATA ---
+                dt_obj = parse_supabase_date(bomba.get(field))
+                if dt_obj:
+                    bomba[field] = dt_obj.strftime("%d/%m/%Y")
         logging.info(f"Busca de bombas retornou {len(bombas)} registros.")
         return bombas
     except Exception as e:
@@ -345,58 +349,37 @@ def get_manutencao(search_term="", filial=None):
         if filial:
             query = query.eq("filial", filial)
         manutencoes = query.execute().data
-
         if not manutencoes:
-            logging.info("Busca de manutenções não retornou registros.")
             return []
-
         manut_df = pd.DataFrame(manutencoes)
-
-        # Filtro em Python mantido para corresponder à lógica original
         if search_term:
             search_term_lower = search_term.lower()
-            mask = manut_df.apply(lambda row: any(
-                search_term_lower in str(row.get(field, "")).lower()
-                for field in ["serial", "defeito", "nf_numero"]
-            ), axis=1)
+            mask = manut_df.apply(lambda row: any(search_term_lower in str(row.get(field, "")).lower() for field in ["serial", "defeito", "nf_numero"]), axis=1)
             manut_df = manut_df[mask]
-
         if manut_df.empty:
-            logging.info(f"Busca de manutenções por '{search_term}' não retornou registros.")
             return []
-
-        # Merge OTIMIZADO com dados das bombas
         bombas_df = get_dados_bombas_df()
         if not bombas_df.empty:
             manut_df['Serial_Normalized'] = manut_df['serial'].apply(normalize_text)
-            merged_df = pd.merge(
-                manut_df,
-                bombas_df[['Serial_Normalized', 'Modelo', 'Ultima_Manut', 'Venc_Manut']],
-                left_on='Serial_Normalized',
-                right_on='Serial_Normalized',
-                how='left'
-            )
+            merged_df = pd.merge(manut_df, bombas_df[['Serial_Normalized', 'Modelo', 'Ultima_Manut', 'Venc_Manut']], left_on='Serial_Normalized', right_on='Serial_Normalized', how='left')
         else:
             merged_df = manut_df
             merged_df['Modelo'] = "N/A"
             merged_df['Ultima_Manut'] = pd.NaT
             merged_df['Venc_Manut'] = pd.NaT
-
-        # Preenchimento e formatação
         merged_df['modelo'] = merged_df['Modelo'].fillna("N/A")
         merged_df['ultima_manut'] = pd.to_datetime(merged_df['Ultima_Manut'], errors='coerce').dt.strftime('%d/%m/%Y').fillna("N/A")
         merged_df['venc_manut'] = pd.to_datetime(merged_df['Venc_Manut'], errors='coerce').dt.strftime('%d/%m/%Y').fillna("N/A")
-        merged_df['data_registro'] = pd.to_datetime(merged_df['data_registro'], errors='coerce').dt.strftime('%d/%m/%Y').fillna("N/A")
-        merged_df['id'] = merged_df['id'].astype(str)
         
-        logging.info(f"Busca de manutenções retornou {len(merged_df)} registros.")
-        return merged_df.to_dict('records')
+        # --- USO DA NOVA FUNÇÃO DE DATA ---
+        merged_df['data_registro'] = merged_df['data_registro'].apply(lambda x: (parse_supabase_date(x).strftime('%d/%m/%Y') if parse_supabase_date(x) else "N/A"))
 
+        merged_df['id'] = merged_df['id'].astype(str)
+        return merged_df.to_dict('records')
     except Exception as e:
         logging.error(f"Erro ao buscar manutenções: {e}")
         st.error("Erro ao acessar dados de manutenção.")
         return []
-
 
 @st.cache_data(ttl=300, show_spinner=False)
 def get_historico_devolvidas(filial=None):
@@ -405,17 +388,12 @@ def get_historico_devolvidas(filial=None):
         if filial:
             query = query.eq("filial", filial)
         historico = query.execute().data
-
         for doc in historico:
             doc["id"] = str(doc["id"])
-            if doc.get("data_evento"):
-                try:
-                    # Supabase retorna ISO 8601 com timezone
-                    dt_obj = datetime.fromisoformat(doc["data_evento"])
-                    doc["data_evento"] = dt_obj.strftime("%d/%m/%Y, %H:%M")
-                except (ValueError, TypeError):
-                    pass # Mantém o valor se a conversão falhar
-        logging.info(f"Histórico de devolvidas retornou {len(historico)} registros.")
+            # --- USO DA NOVA FUNÇÃO DE DATA ---
+            dt_obj = parse_supabase_date(doc.get("data_evento"))
+            if dt_obj:
+                doc["data_evento"] = dt_obj.strftime("%d/%m/%Y, %H:%M")
         return historico
     except Exception as e:
         logging.error(f"Erro ao buscar histórico de devolvidas: {e}")
@@ -424,16 +402,12 @@ def get_historico_devolvidas(filial=None):
 
 @st.cache_data(ttl=300, show_spinner="Carregando dados de curativos...")
 def get_saldo_curativo_data():
-    """Busca todos os dados da tabela saldo_curativo."""
     try:
         response = supabase.table("saldo_curativo").select("*").execute()
         data = response.data
         if not data:
-            logging.warning("A tabela saldo_curativo está vazia ou não foi encontrada.")
             return pd.DataFrame()
-        
         df = pd.DataFrame(data)
-        logging.info(f"Dados da tabela saldo_curativo carregados: {len(df)} registros.")
         return df
     except Exception as e:
         logging.error(f"Erro ao carregar dados da tabela saldo_curativo: {e}")
@@ -443,237 +417,144 @@ def get_saldo_curativo_data():
 @st.cache_data(ttl=300, show_spinner=False)
 def get_dashboard_metrics(filial=None):
     try:
-        # --- LÓGICA DE DADOS OTIMIZADA ---
-        # 1. Buscar todos os dados necessários em poucas chamadas
         dados_bombas_df = get_dados_bombas_df()
         if dados_bombas_df.empty:
             logging.warning("DADOS_BOMBAS está vazio, as métricas podem ser imprecisas.")
-
         active_pumps_list = supabase.table("bombas").select("serial, ativo, status, hospital, filial").eq("ativo", True).execute().data
         active_pumps_df = pd.DataFrame(active_pumps_list if active_pumps_list else [])
-
-        manut_list = supabase.table("manutencao").select("id, filial").eq("status", "Em Manutenção").execute().data
+        manut_list = supabase.table("manutencao").select("id, filial, serial").eq("status", "Em Manutenção").execute().data
         manut_df = pd.DataFrame(manut_list if manut_list else [])
 
-        # --- PROCESSAMENTO ---
-        # Filtra os DataFrames se uma filial específica for solicitada
-        scoped_active_pumps_df = active_pumps_df
-        scoped_manut_df = manut_df
         if filial and not active_pumps_df.empty:
-            scoped_active_pumps_df = active_pumps_df[active_pumps_df['filial'] == filial]
+            scoped_active_pumps_df = active_pumps_df[active_pumps_df['filial'] == filial].copy()
+        else:
+            scoped_active_pumps_df = active_pumps_df.copy()
         if filial and not manut_df.empty:
-            scoped_manut_df = manut_df[manut_df['filial'] == filial]
-            
-        # --- CÁLCULO DAS MÉTRICAS ---
+            scoped_manut_df = manut_df[manut_df['filial'] == filial].copy()
+        else:
+            scoped_manut_df = manut_df.copy()
+
         em_manutencao = len(scoped_manut_df)
 
-        # CÁLCULO DOS MODELOS (ULTA/ACTIVAC) de forma eficiente
         ulta_count = 0
         activac_count = 0
         if not scoped_active_pumps_df.empty and not dados_bombas_df.empty:
             scoped_active_pumps_df['Serial_Normalized'] = scoped_active_pumps_df['serial'].apply(normalize_text)
-            merged_df = pd.merge(
-                scoped_active_pumps_df,
-                dados_bombas_df[['Serial_Normalized', 'Modelo']],
-                on='Serial_Normalized',
-                how='left'
-            )
+            merged_df = pd.merge(scoped_active_pumps_df, dados_bombas_df[['Serial_Normalized', 'Modelo']], on='Serial_Normalized', how='left')
             model_counts = merged_df['Modelo'].str.upper().value_counts().to_dict()
             ulta_count = model_counts.get('ULTA', 0)
             activac_count = model_counts.get('ACTIVAC', 0)
-        
-        # Mantendo a lógica original onde o total do painel é a soma dos modelos
         total_comodato_painel = ulta_count + activac_count
 
-        # CÁLCULO DE DISPONÍVEIS (SEMPRE GLOBAL)
         total_bombas_inventario = len(dados_bombas_df)
-        total_ativas_geral = len(active_pumps_df)
-        total_manut_geral = len(manut_df)
-        disponiveis = total_bombas_inventario - total_ativas_geral - total_manut_geral
+        seriais_ativos = set(active_pumps_df['serial'].apply(normalize_text)) if not active_pumps_df.empty else set()
+        seriais_manut = set(manut_df['serial'].apply(normalize_text)) if not manut_df.empty else set()
+        seriais_indisponiveis = seriais_ativos.union(seriais_manut)
 
-        # Contagens de status e hospital do escopo (filial ou geral)
+        df_estoque = pd.DataFrame()
+        if not dados_bombas_df.empty:
+            df_estoque = dados_bombas_df[~dados_bombas_df['Serial_Normalized'].isin(seriais_indisponiveis)].copy()
+
+        disponiveis = 0
+        modelos_disponiveis_counts = {}
+        if not df_estoque.empty:
+            hoje = datetime.now().date()
+            df_estoque['Venc_Manut_Date'] = pd.to_datetime(df_estoque['Venc_Manut'], errors='coerce').dt.date
+            df_disponiveis = df_estoque[df_estoque['Venc_Manut_Date'] >= hoje].copy()
+            disponiveis = len(df_disponiveis)
+            if not df_disponiveis.empty:
+                modelos_disponiveis_counts = df_disponiveis['Modelo'].str.upper().value_counts().to_dict()
+
         status_counts = scoped_active_pumps_df['status'].value_counts().to_dict() if not scoped_active_pumps_df.empty else {}
         hosp_counts = scoped_active_pumps_df['hospital'].apply(normalize_text).value_counts().to_dict() if not scoped_active_pumps_df.empty else {}
-        
-        # Contagem por filial para o mapa (sempre global)
         bombas_por_filial = active_pumps_df['filial'].apply(normalize_text).value_counts().to_dict() if not active_pumps_df.empty else {}
         
-        # CÁLCULO PARA O NOVO GRÁFICO: Modelos por Filial (SEMPRE GLOBAL)
         modelos_por_filial_records = []
         if not active_pumps_df.empty and not dados_bombas_df.empty:
             active_pumps_df['Serial_Normalized'] = active_pumps_df['serial'].apply(normalize_text)
-            
-            merged_global_df = pd.merge(
-                active_pumps_df,
-                dados_bombas_df[['Serial_Normalized', 'Modelo']],
-                on='Serial_Normalized',
-                how='left'
-            )
-            
+            merged_global_df = pd.merge(active_pumps_df, dados_bombas_df[['Serial_Normalized', 'Modelo']], on='Serial_Normalized', how='left')
             if not merged_global_df.empty and 'filial' in merged_global_df.columns and 'Modelo' in merged_global_df.columns:
                 merged_global_df.dropna(subset=['filial', 'Modelo'], inplace=True)
                 modelos_por_filial_df = merged_global_df.groupby(['filial', 'Modelo']).size().reset_index(name='Quantidade')
                 modelos_por_filial_records = modelos_por_filial_df.to_dict('records')
-
-        # --- Montagem final das métricas ---
+        
         metrics = {
-            "ativas": total_comodato_painel,
-            "disponiveis": disponiveis,
-            "em_manutencao": em_manutencao,
-            "ulta_count": ulta_count,
-            "activac_count": activac_count,
-            "total_bombas": total_bombas_inventario,
+            "ativas": total_comodato_painel, "disponiveis": disponiveis, "em_manutencao": em_manutencao,
+            "ulta_count": ulta_count, "activac_count": activac_count, "total_bombas": total_bombas_inventario,
             "status_counts": {**{"No Prazo": 0, "Menos de 7 dias": 0, "Fora Prazo": 0}, **status_counts},
             "hosp_counts": hosp_counts,
             "bombas_por_filial": {**{"BRASILIA": 0, "GOIANIA": 0, "CUIABA": 0}, **bombas_por_filial},
-            "modelos_por_filial": modelos_por_filial_records
+            "modelos_por_filial": modelos_por_filial_records,
+            "modelos_disponiveis": modelos_disponiveis_counts,
         }
-        
-        logging.info("Métricas do dashboard carregadas com lógica otimizada.")
         return metrics
     except Exception as e:
         logging.error(f"Erro ao obter métricas do dashboard: {e}")
         st.error(f"Erro ao carregar métricas do dashboard: {e}")
         return None
 
-# -------------------- GERAÇÃO DE DOCUMENTOS --------------------
 def convert_docx_to_pdf(docx_path: str, pdf_path: str) -> bool:
-    """
-    Converte .docx para .pdf usando o CLI do LibreOffice (soffice).
-    Este processo é inerentemente lento.
-    """
     try:
-        out_dir = os.path.dirname(pdf_path) or "."
-        os.makedirs(out_dir, exist_ok=True)
-
+        out_dir = os.path.dirname(pdf_path) or "."; os.makedirs(out_dir, exist_ok=True)
         cmd = ["soffice", "--headless", "--convert-to", "pdf", "--outdir", out_dir, docx_path]
-        # Adicionado timeout para evitar que o processo trave indefinidamente
         result = subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
-
         converted_pdf = os.path.join(out_dir, os.path.splitext(os.path.basename(docx_path))[0] + ".pdf")
-        
-        if not os.path.exists(converted_pdf):
-            raise FileNotFoundError(f"PDF gerado não encontrado: {converted_pdf}. Output do Soffice: {result.stderr.decode()}")
-
-        if os.path.abspath(converted_pdf) != os.path.abspath(pdf_path):
-            os.replace(converted_pdf, pdf_path)
-
-        logging.info(f"Convertido: {docx_path} -> {pdf_path}")
+        if not os.path.exists(converted_pdf): raise FileNotFoundError(f"PDF não encontrado: {converted_pdf}. Output: {result.stderr.decode()}")
+        if os.path.abspath(converted_pdf) != os.path.abspath(pdf_path): os.replace(converted_pdf, pdf_path)
         return True
-
-    except subprocess.TimeoutExpired:
-        logging.error("A conversão para PDF demorou muito (timeout).")
-        st.error("A conversão do documento demorou muito e foi interrompida. Tente novamente.")
-    except subprocess.CalledProcessError as e:
-        err = e.stderr.decode()
-        logging.error(f"soffice erro: {err}")
-        st.warning(f"Erro ao converter DOCX->PDF. Verifique se 'libreoffice' está no seu 'packages.txt'. Detalhes: {err}")
     except Exception as e:
-        logging.error(f"Erro na conversão genérica: {e}")
-        st.warning(f"Erro inesperado ao converter para PDF: {e}")
-
-    return False
+        st.warning(f"Erro ao converter para PDF: {e}")
+        return False
 
 def generate_combined_pdf(bomba_data):
     try:
-        # Usar um diretório temporário seguro
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_docx_path = os.path.join(temp_dir, f"contrato_{bomba_data['serial']}.docx")
-            
-            # Tenta carregar o contrato localmente primeiro
             if os.path.exists(CONTRATO_LOCAL_PATH):
                 import shutil
                 shutil.copyfile(CONTRATO_LOCAL_PATH, temp_docx_path)
-            else: # Se não, baixa do storage
+            else:
                 file_content = download_file_from_storage(CONTRATO_STORAGE_PATH)
-                if not file_content:
-                    st.error("Modelo 'contrato.docx' não encontrado localmente ou no Supabase Storage!")
-                    return None
-                with open(temp_docx_path, "wb") as f:
-                    f.write(file_content)
-            
+                if not file_content: st.error("Modelo 'contrato.docx' não encontrado!"); return None
+                with open(temp_docx_path, "wb") as f: f.write(file_content)
             doc = Document(temp_docx_path)
             data_atual = datetime.now()
             meses = ["Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho", "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"]
             data_formatada = f"Brasília, {data_atual.day:02d} de {meses[data_atual.month - 1]} de {data_atual.year}"
-            
-            replacements = {
-                "{SERIAL}": bomba_data.get("serial", "N/A"),
-                "{PACIENTE}": bomba_data.get("paciente", "N/A"),
-                "{NOTA_FISCAL}": bomba_data.get("nf", "N/A"),
-                "{DATA_ATUAL}": data_formatada,
-            }
-
+            replacements = {"{SERIAL}": bomba_data.get("serial", "N/A"), "{PACIENTE}": bomba_data.get("paciente", "N/A"), "{NOTA_FISCAL}": bomba_data.get("nf", "N/A"), "{DATA_ATUAL}": data_formatada}
             for p in doc.paragraphs:
                 for key, value in replacements.items():
-                    # Lógica de substituição de texto mantida
                     if key in p.text:
                         inline = p.runs
                         for i in range(len(inline)):
-                            if key in inline[i].text:
-                                inline[i].text = inline[i].text.replace(key, str(value))
-
+                            if key in inline[i].text: inline[i].text = inline[i].text.replace(key, str(value))
             doc.save(temp_docx_path)
             temp_pdf_path = os.path.join(temp_dir, f"contrato_{bomba_data['serial']}.pdf")
-            
-            if not convert_docx_to_pdf(temp_docx_path, temp_pdf_path):
-                st.error("Falha na conversão do contrato para PDF.")
-                return None
-
+            if not convert_docx_to_pdf(temp_pdf_path, temp_pdf_path): return None
             merger = PdfMerger()
             merger.append(temp_pdf_path)
-
-            # Baixa o PDF técnico da bomba
             pdf_serial_content = download_file_from_storage(f"pdfs/{bomba_data['serial']}.pdf")
-            if pdf_serial_content:
-                merger.append(BytesIO(pdf_serial_content))
-            else:
-                logging.warning(f"Nenhum PDF técnico associado ao serial {bomba_data['serial']} no Supabase Storage.")
-
-            pdf_buffer = BytesIO()
-            merger.write(pdf_buffer)
-            merger.close()
-            
-            pdf_buffer.seek(0) # Garante que o buffer está no início
+            if pdf_serial_content: merger.append(BytesIO(pdf_serial_content))
+            pdf_buffer = BytesIO(); merger.write(pdf_buffer); merger.close(); pdf_buffer.seek(0)
             return pdf_buffer
-
     except Exception as e:
-        logging.error(f"Erro ao gerar PDF Contrato: {e}", exc_info=True)
         st.error(f"Erro ao gerar PDF: {e}")
         return None
 
 def generate_excel_saldo_curativo(df):
-    """Gera um buffer de Excel a partir de um DataFrame do saldo de curativos."""
-    if df.empty:
-        return None
-    
+    if df.empty: return None
     output = BytesIO()
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        df.to_excel(writer, index=False, sheet_name='SaldoCurativo')
-    
-    # O .seek(0) foi removido pois o writer já finaliza o buffer corretamente.
-    # Acessamos o valor final com .getvalue()
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer: df.to_excel(writer, index=False, sheet_name='SaldoCurativo')
     return output.getvalue()
 
-# -------------------- MÓDULO DE MANUTENÇÃO E ARQUIVOS --------------------
 def upload_nf_pdf(serial, data_registro, file):
     try:
         bucket_name = "controle-de-bombas-suplen-files"
-        # Garante que a data está no formato correto para o nome do arquivo
         data_registro_clean = datetime.strptime(data_registro, "%d/%m/%Y").strftime("%Y%m%d")
         file_name = f"{MAINTENANCE_STORAGE_PATH}{serial}_{data_registro_clean}.pdf"
-
-        # Não é necessário salvar em disco, pode-se ler o buffer diretamente
-        file_bytes = file.getvalue()
-        supabase.storage.from_(bucket_name).upload(
-            file_name, file_bytes, 
-            file_options={"content-type": "application/pdf", "upsert": "true"}
-        )
-
-        logging.info(f"NF de manutenção para {serial} enviada com sucesso.")
+        supabase.storage.from_(bucket_name).upload(file_name, file.getvalue(), file_options={"content-type": "application/pdf", "upsert": "true"})
         return True
     except Exception as e:
-        logging.error(f"Erro ao enviar NF de manutenção: {e}")
         st.error(f"Erro ao enviar NF: {e}")
         return False
 
@@ -685,267 +566,129 @@ def upload_nf_assinada(bomba_data, file):
         paciente = normalize_text(bomba_data.get('paciente', 'SEM_PACIENTE')).replace(' ', '')
         data_registro_str = "DD-MM-AAAA"
         if bomba_data.get('data_registro'):
-            try:
-                # A data já vem formatada como dd/mm/YYYY
-                dt_obj = datetime.strptime(bomba_data['data_registro'], '%d/%m/%Y')
-                data_registro_str = dt_obj.strftime('%d-%m-%Y')
-            except (ValueError, TypeError):
-                data_registro_str = str(bomba_data['data_registro']).replace('/', '-')
-        
+            try: data_registro_str = datetime.strptime(bomba_data['data_registro'], '%d/%m/%Y').strftime('%d-%m-%Y')
+            except (ValueError, TypeError): data_registro_str = str(bomba_data['data_registro']).replace('/', '-')
         file_name = f"nfs_assinadas/{serial}*{hospital}_{paciente}*{data_registro_str}_assinado.pdf"
-        
-        file_bytes = file.getvalue()
-        supabase.storage.from_(bucket_name).upload(
-            file_name, file_bytes, 
-            file_options={"content-type": "application/pdf", "cache-control": "3600", "upsert": "true"}
-        )
-        
-        logging.info(f"NF assinada para {serial} enviada com sucesso como {file_name}.")
+        supabase.storage.from_(bucket_name).upload(file_name, file.getvalue(), file_options={"content-type": "application/pdf", "cache-control": "3600", "upsert": "true"})
         return True
     except Exception as e:
-        logging.error(f"Erro ao enviar NF assinada: {e}")
         st.error(f"Erro ao enviar NF assinada: {e}")
         return False
 
 @st.cache_data(ttl=300)
 def get_all_nfs_assinadas_info():
-    """OTIMIZADO: Lista todos os arquivos na pasta uma única vez e cria um mapa de serial para nome de arquivo."""
     try:
         bucket_name = "controle-de-bombas-suplen-files"
         path = "nfs_assinadas/"
         files = supabase.storage.from_(bucket_name).list(path)
-        
         serial_to_filename_map = {}
-        search_suffix = "_assinado.pdf"
         for file_info in files:
             name = file_info.get('name')
-            if name and name.endswith(search_suffix):
-                # Extrai o serial do nome do arquivo (parte antes do primeiro '*')
-                serial = name.split('*')[0]
-                serial_to_filename_map[serial] = f"{path}{name}"
+            if name and name.endswith("_assinado.pdf"):
+                serial_to_filename_map[name.split('*')[0]] = f"{path}{name}"
         return serial_to_filename_map
     except Exception as e:
         logging.error(f"Erro ao listar NFs assinadas: {e}")
         return {}
 
-# Esta função agora é um lookup rápido em um dicionário em cache
-def get_nf_assinada_filename(serial, nf_map):
-    return nf_map.get(serial)
-
-# Esta função agora é um lookup rápido em um dicionário em cache
-def check_nf_assinada(serial, nf_map):
-    return serial in nf_map
+def get_nf_assinada_filename(serial, nf_map): return nf_map.get(serial)
+def check_nf_assinada(serial, nf_map): return serial in nf_map
 
 @st.cache_data(ttl=300)
 def download_nf_assinada(serial):
-    """OTIMIZADO: Usa o mapa de NFs para encontrar o arquivo rapidamente."""
     try:
         nf_map = get_all_nfs_assinadas_info()
         file_path = get_nf_assinada_filename(serial, nf_map)
-        
-        if file_path:
-            bucket_name = "controle-de-bombas-suplen-files"
-            response = supabase.storage.from_(bucket_name).download(file_path)
-            return response
+        if file_path: return supabase.storage.from_("controle-de-bombas-suplen-files").download(file_path)
         return None
     except Exception as e:
         logging.error(f"Erro ao baixar NF assinada para {serial}: {e}")
         return None
 
 def format_status(status):
-    status_map = {
-        "No Prazo": '<span class="status-badge status-no-prazo">🟢 No Prazo</span>',
-        "Menos de 7 dias": '<span class="status-badge status-menos-7-dias">🟡 Menos de 7 dias</span>',
-        "Fora Prazo": '<span class="status-badge status-fora-prazo">🔴 Fora Prazo</span>',
-        "Indefinido": '<span class="status-badge status-indefinido">Indefinido</span>',
-        "Data Inválida": '<span class="status-badge status-data-invalida">Data Inválida</span>',
-        "✅ DEVOLVIDA": '<span class="status-badge status-devolvida">✅ Devolvida</span>',
-        "Em Manutenção": '<span class="status-badge status-em-manutencao">🛠 Em Manutenção</span>'
-    }
+    status_map = {"No Prazo": '<span class="status-badge status-no-prazo">🟢 No Prazo</span>', "Menos de 7 dias": '<span class="status-badge status-menos-7-dias">🟡 Menos de 7 dias</span>', "Fora Prazo": '<span class="status-badge status-fora-prazo">🔴 Fora Prazo</span>', "Indefinido": '<span class="status-badge status-indefinido">Indefinido</span>', "Data Inválida": '<span class="status-badge status-data-invalida">Data Inválida</span>', "✅ DEVOLVIDA": '<span class="status-badge status-devolvida">✅ Devolvida</span>', "Em Manutenção": '<span class="status-badge status-em-manutencao">🛠 Em Manutenção</span>'}
     return status_map.get(status, status)
 
 def display_manutencao_table(title, manutencoes):
-    st.markdown(f"### {title}")
-    if not manutencoes:
-        st.info("Nenhum registro encontrado.")
-        return
-
-    # Usando st.data_editor para uma tabela mais interativa e com melhor performance
+    st.markdown(f"### {title}");
+    if not manutencoes: st.info("Nenhum registro encontrado."); return
     df = pd.DataFrame(manutencoes)
-    df_display = df[[
-        "data_registro", "serial", "modelo", 
-        "ultima_manut", "venc_manut", "defeito", 
-        "nf_numero", "status"
-    ]].copy()
-    
-    df_display.rename(columns={
-        "data_registro": "DATA REGISTRO",
-        "serial": "SERIAL",
-        "modelo": "MODELO",
-        "ultima_manut": "ÚLTIMA MANUT",
-        "venc_manut": "VENC. MANUT",
-        "defeito": "DEFEITO",
-        "nf_numero": "NF EMITIDA",
-        "status": "STATUS"
-    }, inplace=True)
-
-    # Nota: A exibição de HTML dentro do dataframe não é suportada diretamente.
-    # O status será exibido como texto. A funcionalidade é priorizada sobre o estilo aqui.
+    df_display = df[["data_registro", "serial", "modelo", "ultima_manut", "venc_manut", "defeito", "nf_numero", "status"]].copy()
+    df_display.rename(columns={"data_registro": "DATA REGISTRO", "serial": "SERIAL", "modelo": "MODELO", "ultima_manut": "ÚLTIMA MANUT", "venc_manut": "VENC. MANUT", "defeito": "DEFEITO", "nf_numero": "NF EMITIDA", "status": "STATUS"}, inplace=True)
     st.dataframe(df_display, use_container_width=True, hide_index=True)
-    
-    st.markdown("---")
-    st.markdown("#### Ações de Manutenção")
-    
+    st.markdown("---"); st.markdown("#### Ações de Manutenção")
     manutencoes_em_andamento = [m for m in manutencoes if m.get('status') == 'Em Manutenção']
     if manutencoes_em_andamento:
-        selected_manut = st.selectbox(
-            "Selecione uma manutenção para marcar como devolvida:", 
-            options=manutencoes_em_andamento,
-            format_func=lambda m: f"Serial: {m.get('serial')} - Defeito: {m.get('defeito', '')[:30]}...",
-            key="devolver_manut_select",
-            index=None,
-            placeholder="Selecione uma bomba em manutenção"
-        )
+        selected_manut = st.selectbox("Selecione uma manutenção para marcar como devolvida:", options=manutencoes_em_andamento, format_func=lambda m: f"Serial: {m.get('serial')} - Defeito: {m.get('defeito', '')[:30]}...", key="devolver_manut_select", index=None, placeholder="Selecione uma bomba em manutenção")
         if selected_manut and st.button(f"Marcar Devolução da Bomba {selected_manut['serial']}", key=f"devolver_manut_{selected_manut['id']}"):
             try:
                 with st.spinner("Atualizando status..."):
                     supabase.table("manutencao").update({"status": "Devolvida"}).eq("id", selected_manut["id"]).execute()
                     register_event("manutencao", selected_manut["id"], f"BOMBA DEVOLVIDA APÓS MANUTENÇÃO (SERIAL: {selected_manut['serial']})", selected_manut['filial'])
-                    flush_events()
-                    st.session_state.messages.append({"text": f"Bomba {selected_manut['serial']} marcada como devolvida!", "icon": "✅"})
-                    st.cache_data.clear()
-                    st.rerun()
-            except Exception as e:
-                st.error(f"Erro ao marcar como devolvida: {e}")
-    else:
-        st.info("Nenhuma bomba 'Em Manutenção' para realizar ações.")
-
+                    flush_events(); st.session_state.messages.append({"text": f"Bomba {selected_manut['serial']} marcada como devolvida!", "icon": "✅"}); st.cache_data.clear(); st.rerun()
+            except Exception as e: st.error(f"Erro ao marcar como devolvida: {e}")
+    else: st.info("Nenhuma bomba 'Em Manutenção' para realizar ações.")
 
 def display_bombas_table(title, bombas_list, bombas_df, nf_map):
-    st.markdown(f"### {title}")
-    if not bombas_list:
-        st.info("Nenhum registro encontrado.")
-        return
-
+    st.markdown(f"### {title}");
+    if not bombas_list: st.info("Nenhum registro encontrado."); return
     df = pd.DataFrame(bombas_list)
     df['serial_normalized'] = df['serial'].apply(normalize_text)
-    
-    # OTIMIZADO: Merge para obter detalhes das bombas
     if not bombas_df.empty:
-        merged_df = pd.merge(
-            df,
-            bombas_df,
-            left_on='serial_normalized',
-            right_on='Serial_Normalized',
-            how='left'
-        )
-        df['modelo'] = merged_df['Modelo'].fillna('N/A')
-        df['ultima_manut'] = merged_df['Ultima_Manut'].dt.strftime('%d/%m/%Y').fillna('N/A')
-        df['venc_manut'] = merged_df['Venc_Manut'].dt.strftime('%d/%m/%Y').fillna('N/A')
-    else:
-        df['modelo'] = 'N/A'
-        df['ultima_manut'] = 'N/A'
-        df['venc_manut'] = 'N/A'
-
-    # OTIMIZADO: Verificação de NF assinada a partir do mapa em cache
-    df['nf_assinada'] = df['serial'].apply(lambda s: check_nf_assinada(s, nf_map))
-    df['nf_assinada_str'] = df['nf_assinada'].apply(lambda x: "✅ Sim" if x else "❌ Não")
-    
-    # Formatação para exibição
-    df['status_html'] = df['status'].apply(format_status)
-    df['periodo_str'] = df['periodo'].apply(lambda x: f"{x} dias" if pd.notna(x) and x != "N/A" else "N/A")
-
-    # Selecionar e renomear colunas para exibição
-    display_df = df[[
-        "serial", "modelo", "hospital", "paciente", 
-        "data_saida", "periodo_str", "status_html", "nf", 
-        "ultima_manut", "venc_manut", "nf_assinada_str"
-    ]].rename(columns={
-        "serial": "SERIAL", "modelo": "MODELO", "hospital": "HOSPITAL",
-        "paciente": "PACIENTE", "data_saida": "DATA SAÍDA", "periodo_str": "PERÍODO",
-        "status_html": "STATUS", "nf": "NF", "ultima_manut": "ÚLTIMA MANUT",
-        "venc_manut": "VENC MANUT", "nf_assinada_str": "NF ASSINADA"
-    })
-    
+        merged_df = pd.merge(df, bombas_df, left_on='serial_normalized', right_on='Serial_Normalized', how='left')
+        df['modelo'] = merged_df['Modelo'].fillna('N/A'); df['ultima_manut'] = merged_df['Ultima_Manut'].dt.strftime('%d/%m/%Y').fillna('N/A'); df['venc_manut'] = merged_df['Venc_Manut'].dt.strftime('%d/%m/%Y').fillna('N/A')
+    else: df['modelo'] = 'N/A'; df['ultima_manut'] = 'N/A'; df['venc_manut'] = 'N/A'
+    df['nf_assinada'] = df['serial'].apply(lambda s: check_nf_assinada(s, nf_map)); df['nf_assinada_str'] = df['nf_assinada'].apply(lambda x: "✅ Sim" if x else "❌ Não")
+    df['status_html'] = df['status'].apply(format_status); df['periodo_str'] = df['periodo'].apply(lambda x: f"{x} dias" if pd.notna(x) and x != "N/A" else "N/A")
+    display_df = df[["serial", "modelo", "hospital", "paciente", "data_saida", "periodo_str", "status_html", "nf", "ultima_manut", "venc_manut", "nf_assinada_str"]].rename(columns={"serial": "SERIAL", "modelo": "MODELO", "hospital": "HOSPITAL", "paciente": "PACIENTE", "data_saida": "DATA SAÍDA", "periodo_str": "PERÍODO", "status_html": "STATUS", "nf": "NF", "ultima_manut": "ÚLTIMA MANUT", "venc_manut": "VENC MANUT", "nf_assinada_str": "NF ASSINADA"})
     st.markdown(display_df.to_html(escape=False, index=False), unsafe_allow_html=True)
 
-
 def generate_excel_bombas_ativas(bombas, bombas_df, filial, nf_map):
-    if not bombas:
-        return None
-
-    df = pd.DataFrame(bombas)
-    df['serial_normalized'] = df['serial'].apply(normalize_text)
-    
+    if not bombas: return None
+    df = pd.DataFrame(bombas); df['serial_normalized'] = df['serial'].apply(normalize_text)
     if not bombas_df.empty:
-        merged_df = pd.merge(
-            df,
-            bombas_df,
-            left_on='serial_normalized',
-            right_on='Serial_Normalized',
-            how='left'
-        )
-        df['modelo'] = merged_df['Modelo'].fillna('N/A')
-        df['ultima_manut'] = merged_df['Ultima_Manut'].dt.strftime('%d/%m/%Y').fillna('N/A')
-        df['venc_manut'] = merged_df['Venc_Manut'].dt.strftime('%d/%m/%Y').fillna('N/A')
-    else:
-        df['modelo'] = 'N/A'
-        df['ultima_manut'] = 'N/A'
-        df['venc_manut'] = 'N/A'
-    
-    df['nf_assinada'] = df['serial'].apply(lambda s: check_nf_assinada(s, nf_map))
-    df['NF ASSINADA'] = df['nf_assinada'].apply(lambda x: "Sim" if x else "Não")
-    
+        merged_df = pd.merge(df, bombas_df, left_on='serial_normalized', right_on='Serial_Normalized', how='left')
+        df['modelo'] = merged_df['Modelo'].fillna('N/A'); df['ultima_manut'] = merged_df['Ultima_Manut'].dt.strftime('%d/%m/%Y').fillna('N/A'); df['venc_manut'] = merged_df['Venc_Manut'].dt.strftime('%d/%m/%Y').fillna('N/A')
+    else: df['modelo'] = 'N/A'; df['ultima_manut'] = 'N/A'; df['venc_manut'] = 'N/A'
+    df['nf_assinada'] = df['serial'].apply(lambda s: check_nf_assinada(s, nf_map)); df['NF ASSINADA'] = df['nf_assinada'].apply(lambda x: "Sim" if x else "Não")
     cols = ["serial", "modelo", "hospital", "paciente", "data_saida", "periodo", "status", "nf", "ultima_manut", "venc_manut", "NF ASSINADA"]
     display_cols = ["SERIAL", "MODELO", "HOSPITAL", "PACIENTE", "DATA SAÍDA", "PERÍODO", "STATUS", "NF", "ÚLTIMA MANUT", "VENC MANUT", "NF ASSINADA"]
-    
-    df_excel = df[cols]
-    df_excel.columns = display_cols
-    df_excel["PERÍODO"] = df_excel["PERÍODO"].apply(lambda x: f"{x} dias" if pd.notna(x) else "N/A")
-    
-    buffer = BytesIO()
-    df_excel.to_excel(buffer, index=False, engine="openpyxl")
-    buffer.seek(0)
+    df_excel = df[cols]; df_excel.columns = display_cols; df_excel["PERÍODO"] = df_excel["PERÍODO"].apply(lambda x: f"{x} dias" if pd.notna(x) else "N/A")
+    buffer = BytesIO(); df_excel.to_excel(buffer, index=False, engine="openpyxl"); buffer.seek(0)
     return buffer
 
-# -------------------- INTERFACE --------------------
 def main():
     st.markdown('<h1 class="main-title">Controle de Bombas de Sucção</h1>', unsafe_allow_html=True)
     st.markdown('<p class="subtitle">Desenvolvido por Guilherme Rodrigues – Suplen Médical</p>', unsafe_allow_html=True)
     
+    if 'bomba_edit_key' not in st.session_state:
+        st.session_state.bomba_edit_key = 0
+
     filial = setup_filial()
     if not filial and not st.session_state.get("general_mode", False):
         st.sidebar.warning("Por favor, selecione e confirme uma filial para continuar.")
         return
-
     if filial:
         st.markdown(f'<p class="filial-main">Filial: {filial}</p>', unsafe_allow_html=True)
     else:
         st.markdown(f'<p class="filial-main">Dashboard Geral</p>', unsafe_allow_html=True)
-
     if "messages" not in st.session_state:
         st.session_state.messages = []
-    
     for msg in st.session_state.messages:
         st.toast(msg['text'], icon=msg['icon'])
     st.session_state.messages = []
-
     menu = ["Dashboard", "Registrar", "Bombas em Comodato", "Devolver", "Manutenção de Bombas", "Histórico Devolvidas", "Saldo Curativo"]
     if st.session_state.get("general_mode", False):
         menu = ["Dashboard Geral"]
-    
     choice = st.sidebar.selectbox("Navegação", menu, format_func=lambda x: f"📋 {x}")
 
     if choice == "Dashboard":
         st.markdown('<h2 style="font-size: 1.25rem; margin-bottom: 1rem;">Dashboard da Filial</h2>', unsafe_allow_html=True)
-        
         with st.spinner("Carregando métricas da filial..."):
             metrics = get_dashboard_metrics(filial)
-
         if not metrics:
             st.error("Erro ao carregar métricas do dashboard.")
             return
-
         st.markdown("##### Visão Geral")
         col1, col2, col3, col4, col5 = st.columns(5)
         col1.metric("BOMBAS EM COMODATO", metrics["ativas"])
@@ -953,48 +696,43 @@ def main():
         col3.metric("Em Manutenção", metrics["em_manutencao"])
         col4.metric("Bombas ULTA", metrics.get("ulta_count", "N/A"))
         col5.metric("Bombas ACTIVAC", metrics.get("activac_count", "N/A"))
-
-        st.markdown("---")
         
+        st.markdown("<h5 style='text-align: center; margin-top: 20px;'>Bombas Disponíveis</h5>", unsafe_allow_html=True)
+        modelos_disponiveis = metrics.get("modelos_disponiveis", {})
+        ulta_disp = modelos_disponiveis.get("ULTA", 0)
+        activac_disp = modelos_disponiveis.get("ACTIVAC", 0)
+        outros_disp_sum = sum(v for k, v in modelos_disponiveis.items() if k not in ["ULTA", "ACTIVAC"])
+        if outros_disp_sum > 0:
+            disp_col1, disp_col2, disp_col3 = st.columns(3)
+            disp_col1.metric("ULTA Disponíveis", ulta_disp)
+            disp_col2.metric("ACTIVAC Disponíveis", activac_disp)
+            disp_col3.metric("Outros Modelos", outros_disp_sum)
+        else:
+            _, disp_col1, disp_col2, _ = st.columns([1, 2, 2, 1])
+            disp_col1.metric("ULTA Disponíveis", ulta_disp)
+            disp_col2.metric("ACTIVAC Disponíveis", activac_disp)
+        
+        st.markdown("---")
         col_graph1, col_graph2 = st.columns(2)
         with col_graph1:
             st.markdown("#### Status das Bombas em Comodato")
             df_status = pd.DataFrame(list(metrics["status_counts"].items()), columns=['Status', 'Quantidade'])
             df_status = df_status[df_status['Quantidade'] > 0]
-            
             if not df_status.empty:
-                df_status['Status_Label'] = df_status['Status'].apply(
-                    lambda x: f"🟢 {x}" if x == "No Prazo" else f"🟡 {x}" if x == "Menos de 7 dias" else f"🔴 {x}" if x == "Fora Prazo" else x
-                )
-                fig_pie = px.pie(
-                    df_status, names='Status_Label', values='Quantidade',
-                    title="Distribuição por Status", template="plotly_dark",
-                    color_discrete_sequence=px.colors.qualitative.Set2
-                )
+                df_status['Status_Label'] = df_status['Status'].apply(lambda x: f"🟢 {x}" if x == "No Prazo" else f"🟡 {x}" if x == "Menos de 7 dias" else f"🔴 {x}" if x == "Fora Prazo" else x)
+                fig_pie = px.pie(df_status, names='Status_Label', values='Quantidade', title="Distribuição por Status", template="plotly_dark", color_discrete_sequence=px.colors.qualitative.Set2)
                 fig_pie.update_traces(textposition='inside', textinfo='percent+label', textfont_size=14)
                 st.plotly_chart(fig_pie, use_container_width=True)
             else:
                 st.info("Sem bombas em comodato para exibir.")
-        
         with col_graph2:
             st.markdown("#### Bombas em Comodato por Hospital")
             df_hosp = pd.DataFrame(list(metrics["hosp_counts"].items()), columns=['hospital', 'count'])
             if not df_hosp.empty:
-                # Substitui nomes de hospitais vazios por um rótulo descritivo
                 df_hosp['hospital'] = df_hosp['hospital'].replace('', 'HOSPITAL NÃO ESPECIFICADO')
                 df_hosp['hospital_label'] = df_hosp['hospital'].apply(lambda x: x[:30] + '...' if len(x) > 30 else x)
-                fig_bar = px.bar(
-                    df_hosp.sort_values('count', ascending=False).head(15), 
-                    x='hospital_label', y='count',
-                    title="Top 15 Hospitais com Bombas", color='hospital_label',
-                    text='count', template='plotly_dark',
-                    labels={'hospital_label': 'Hospital', 'count': 'Nº de Bombas'},
-                    color_discrete_sequence=px.colors.qualitative.Dark24
-                )
-                fig_bar.update_layout(
-                    showlegend=False, xaxis_tickangle=-45, 
-                    xaxis=dict(tickfont=dict(size=10), automargin=True)
-                )
+                fig_bar = px.bar(df_hosp.sort_values('count', ascending=False).head(15), x='hospital_label', y='count', title="Top 15 Hospitais com Bombas", color='hospital_label', text='count', template='plotly_dark', labels={'hospital_label': 'Hospital', 'count': 'Nº de Bombas'}, color_discrete_sequence=px.colors.qualitative.Dark24)
+                fig_bar.update_layout(showlegend=False, xaxis_tickangle=-45, xaxis=dict(tickfont=dict(size=10), automargin=True))
                 st.plotly_chart(fig_bar, use_container_width=True)
             else:
                 st.info("Sem bombas em comodato para exibir.")
@@ -1003,22 +741,34 @@ def main():
         st.markdown('<h2 style="font-size: 1.25rem; margin-bottom: 1rem;">Dashboard Geral (Todas as Filiais)</h2>', unsafe_allow_html=True)
         filial_filter = st.selectbox("Filtrar por Filial", ["Todas"] + FILIAIS, key="filial_filter")
         filial_to_query = filial_filter if filial_filter != "Todas" else None
-
         with st.spinner("Carregando métricas gerais..."):
             metrics = get_dashboard_metrics(filial_to_query)
-        
         if not metrics:
             st.error("Erro ao carregar métricas do dashboard.")
             return
-            
         st.markdown("#### Métricas Gerais do Inventário")
         col1, col2, col3, col4 = st.columns(4)
         col1.metric("Total de Bombas Registradas", metrics["total_bombas"])
         col2.metric("Bombas em Comodato", metrics["ativas"])
         col3.metric("Disponíveis", metrics["disponiveis"])
         col4.metric("Em Manutenção", metrics["em_manutencao"])
-        st.markdown("---")
+        
+        st.markdown("<h5 style='text-align: center; margin-top: 20px;'>Bombas Disponíveis (Geral)</h5>", unsafe_allow_html=True)
+        modelos_disponiveis = metrics.get("modelos_disponiveis", {})
+        ulta_disp = modelos_disponiveis.get("ULTA", 0)
+        activac_disp = modelos_disponiveis.get("ACTIVAC", 0)
+        outros_disp_sum = sum(v for k, v in modelos_disponiveis.items() if k not in ["ULTA", "ACTIVAC"])
+        if outros_disp_sum > 0:
+            disp_col1, disp_col2, disp_col3 = st.columns(3)
+            disp_col1.metric("ULTA Disponíveis", ulta_disp)
+            disp_col2.metric("ACTIVAC Disponíveis", activac_disp)
+            disp_col3.metric("Outros Modelos", outros_disp_sum)
+        else:
+            _, disp_col1, disp_col2, _ = st.columns([1, 2, 2, 1])
+            disp_col1.metric("ULTA Disponíveis", ulta_disp)
+            disp_col2.metric("ACTIVAC Disponíveis", activac_disp)
 
+        st.markdown("---")
         st.markdown("### Análise das Bombas em Comodato")
         col_graph1, col_graph2 = st.columns(2)
         with col_graph1:
@@ -1027,40 +777,26 @@ def main():
             df_status_global = df_status_global[df_status_global['Quantidade'] > 0]
             if not df_status_global.empty:
                 df_status_global['Status_Label'] = df_status_global['Status'].apply(lambda x: f"🟢 {x}" if x == "No Prazo" else f"🟡 {x}" if x == "Menos de 7 dias" else f"🔴 {x}" if x == "Fora Prazo" else x)
-                fig_pie_global = px.pie(
-                    df_status_global, names='Status_Label', values='Quantidade',
-                    title="Distribuição por Status", template="plotly_dark",
-                    color_discrete_sequence=px.colors.qualitative.Set2
-                )
+                fig_pie_global = px.pie(df_status_global, names='Status_Label', values='Quantidade', title="Distribuição por Status", template="plotly_dark", color_discrete_sequence=px.colors.qualitative.Set2)
                 fig_pie_global.update_traces(textposition='inside', textinfo='percent+label', textfont_size=14)
                 st.plotly_chart(fig_pie_global, use_container_width=True)
             else:
                 st.info("Nenhuma bomba em comodato para exibir status.")
-                
         with col_graph2:
             st.markdown("##### Distribuição por Hospital")
             df_hosp_global = pd.DataFrame(list(metrics["hosp_counts"].items()), columns=['hospital', 'count'])
             if not df_hosp_global.empty:
-                # Substitui nomes de hospitais vazios por um rótulo descritivo
                 df_hosp_global['hospital'] = df_hosp_global['hospital'].replace('', 'HOSPITAL NÃO ESPECIFICADO')
                 df_hosp_global['hospital_label'] = df_hosp_global['hospital'].apply(lambda x: x[:30] + '...' if len(x) > 30 else x)
-                fig_bar_global = px.bar(
-                    df_hosp_global.sort_values('count', ascending=False).head(15), 
-                    x='hospital_label', y='count',
-                    title="Top 15 Hospitais", color='hospital_label', text='count',
-                    template='plotly_dark', labels={'hospital_label': 'Hospital', 'count': 'Nº de Bombas'},
-                    color_discrete_sequence=px.colors.qualitative.Dark24
-                )
+                fig_bar_global = px.bar(df_hosp_global.sort_values('count', ascending=False).head(15), x='hospital_label', y='count', title="Top 15 Hospitais", color='hospital_label', text='count', template='plotly_dark', labels={'hospital_label': 'Hospital', 'count': 'Nº de Bombas'}, color_discrete_sequence=px.colors.qualitative.Dark24)
                 fig_bar_global.update_layout(showlegend=False, xaxis_tickangle=-45, xaxis=dict(tickfont=dict(size=10), automargin=True))
                 st.plotly_chart(fig_bar_global, use_container_width=True)
             else:
                 st.info("Nenhuma bomba em comodato para exibir por hospital.")
         st.markdown("---")
-
         st.markdown("### Análise do Inventário e Manutenção")
         with st.spinner("Analisando dados de manutenção de todas as bombas..."):
             dados_bombas_df = get_dados_bombas_df()
-
         if dados_bombas_df.empty:
             st.warning("Dados de manutenção não encontrados. Gráficos de inventário não podem ser gerados.")
         else:
@@ -1072,13 +808,11 @@ def main():
             activac_non_expired = non_expired_model_counts.get('ACTIVAC', 0)
             model_counts = dados_bombas_df['Modelo'].value_counts()
             model_df = pd.DataFrame({'Modelo': model_counts.index, 'Quantidade': model_counts.values})
-
             st.markdown("##### Manutenção Preventiva")
             m_col1, m_col2, m_col3 = st.columns(3)
             m_col1.metric("Bombas com Manutenção Vencida", overdue_count)
             m_col2.metric("ULTA com Manutenção Válida", ulta_non_expired)
             m_col3.metric("ACTIVAC com Manutenção Válida", activac_non_expired)
-
             st.markdown("##### Distribuição de Modelos no Inventário Total")
             if not model_df.empty:
                 fig_model = px.pie(model_df, names='Modelo', values='Quantidade', title="Distribuição de Bombas por Modelo", template="plotly_dark", color_discrete_sequence=px.colors.qualitative.Set2)
@@ -1087,31 +821,21 @@ def main():
             else:
                 st.info("Sem dados de modelos para exibir.")
         st.markdown("---")
-
         col1, col2 = st.columns([3, 1])
         with col1:
             st.markdown("### Mapa de Bombas por Filial (Todas as Filiais)")
             m = folium.Map(location=[-15.0, -55.0], zoom_start=4, tiles="CartoDB Dark_Matter")
             coordinates = {"Brasília": (-15.7942, -47.8822), "Goiânia": (-16.6869, -49.2648), "Cuiabá": (-15.6014, -56.0979)}
             colors = {"Brasília": "#1E90FF", "Goiânia": "#32CD32", "Cuiabá": "#FFD700"}
-            
             for filial_map, (lat, lon) in coordinates.items():
                 normalized_filial = normalize_text(filial_map)
                 count = metrics["bombas_por_filial"].get(normalized_filial, 0)
                 if count > 0:
-                    radius = max(10000, count * 15000) # Ajustado para melhor visualização
-                    folium.Circle(
-                        location=[lat, lon], radius=radius, fill=True, fill_opacity=0.3, 
-                        color=colors.get(filial_map, 'gray'), fill_color=colors.get(filial_map, 'gray'), 
-                        popup=folium.Popup(f"{filial_map}: {count} bombas em comodato", max_width=200)
-                    ).add_to(m)
-            
+                    radius = max(10000, count * 15000)
+                    folium.Circle(location=[lat, lon], radius=radius, fill=True, fill_opacity=0.3, color=colors.get(filial_map, 'gray'), fill_color=colors.get(filial_map, 'gray'), popup=folium.Popup(f"{filial_map}: {count} bombas em comodato", max_width=200)).add_to(m)
             st_folium(m, width=800, height=400)
         with col2:
-            legend_html = """
-            <div style="height: 100%; display: flex; flex-direction: column; justify-content: flex-start;">
-                <h3>Legenda</h3>
-            """
+            legend_html = """<div style="height: 100%; display: flex; flex-direction: column; justify-content: flex-start;"><h3>Legenda</h3>"""
             items_added = False
             for filial_map, color in colors.items():
                 normalized_filial = normalize_text(filial_map)
@@ -1119,70 +843,42 @@ def main():
                 if display_count > 0:
                     items_added = True
                     legend_html += (f'<div class="legend-item"><span class="legend-dot" style="background-color: {color};"></span>{filial_map}: {display_count}</div>')
-            
             if not items_added:
                 legend_html += "<div>Nenhuma bomba em comodato registrada.</div>"
-            
             legend_html += "</div>"
             st.markdown(legend_html, unsafe_allow_html=True)
-            
         st.markdown("---")
-
         st.markdown("### Total de Bombas por Modelo em Cada Filial")
         if metrics.get("modelos_por_filial"):
             df_modelos_filial = pd.DataFrame(metrics["modelos_por_filial"])
             if not df_modelos_filial.empty:
                 df_modelos_filial = df_modelos_filial.sort_values(by=['filial', 'Modelo'])
-                fig_modelos_filial = px.bar(
-                    df_modelos_filial, 
-                    x='filial', 
-                    y='Quantidade', 
-                    color='Modelo', 
-                    title='Distribuição de Modelos de Bombas por Filial', 
-                    barmode='group', 
-                    text_auto=True,
-                    template='plotly_dark',
-                    labels={'filial': 'Filial', 'Quantidade': 'Nº de Bombas', 'Modelo': 'Modelo da Bomba'},
-                    color_discrete_sequence=px.colors.qualitative.Vivid
-                )
-                fig_modelos_filial.update_layout(
-                    xaxis_title="Filial",
-                    yaxis_title="Total de Bombas",
-                    legend_title_text='Modelo'
-                )
+                fig_modelos_filial = px.bar(df_modelos_filial, x='filial', y='Quantidade', color='Modelo', title='Distribuição de Modelos de Bombas por Filial', barmode='group', text_auto=True, template='plotly_dark', labels={'filial': 'Filial', 'Quantidade': 'Nº de Bombas', 'Modelo': 'Modelo da Bomba'}, color_discrete_sequence=px.colors.qualitative.Vivid)
+                fig_modelos_filial.update_layout(xaxis_title="Filial", yaxis_title="Total de Bombas", legend_title_text='Modelo')
                 st.plotly_chart(fig_modelos_filial, use_container_width=True)
             else:
                 st.info("Não há dados de modelos por filial para exibir.")
         else:
             st.info("Métricas de modelos por filial não disponíveis.")
-
         st.markdown('<h2 class="section-title">Análise de Curativos</h2>', unsafe_allow_html=True)
         with st.spinner("Carregando análise de curativos..."):
             curativo_results = analyze_curativo()
-            
             if curativo_results.get('last_updated'):
-                try:
-                    ts_utc_str = curativo_results['last_updated'].replace("Z", "+00:00")
-                    ts_utc = datetime.fromisoformat(ts_utc_str)
+                ts_utc = parse_supabase_date(curativo_results.get('last_updated'))
+                if ts_utc:
                     ts_local = ts_utc.astimezone(timezone(timedelta(hours=-3)))
                     formatted_ts = ts_local.strftime('%d/%m/%Y às %H:%M')
                     st.caption(f"🗓️ _Dados da planilha atualizados em: **{formatted_ts}**_")
-                except Exception as e:
-                    logging.error(f"Erro ao formatar o timestamp da planilha: {e}")
-
             if curativo_results.get('error'):
                 st.error(curativo_results['error'])
             else:
                 status_to_exclude = ['Disponível', 'Não Encontrado']
-                
                 status_df = curativo_results.get('status_df', pd.DataFrame())
                 if not status_df.empty:
                     status_df = status_df[~status_df['Status'].isin(status_to_exclude)]
-
                 revenue_status_df = curativo_results.get('revenue_status_df', pd.DataFrame())
                 if not revenue_status_df.empty:
                     revenue_status_df = revenue_status_df[~revenue_status_df['Status'].isin(status_to_exclude)]
-
                 col1, col2 = st.columns(2)
                 with col1:
                     st.markdown("#### Porcentagem de Vendas por Status")
@@ -1237,15 +933,8 @@ def main():
                                 st.error(f"ERRO: A bomba com o serial '{serial}' já está registrada e ativa.")
                             else:
                                 data_saida_fmt = data_saida.strftime("%Y-%m-%d")
-                                status_inicial = calculate_status(data_saida, int(periodo))
-                                new_record = {
-                                    "serial": serial, "hospital": hospital, "paciente": paciente, 
-                                    "medico": medico, "convenio": convenio, 
-                                    "data_registro": datetime.now().strftime("%Y-%m-%d"), 
-                                    "data_saida": data_saida_fmt, "periodo": int(periodo), 
-                                    "status": status_inicial, "nf": nf, "pedido": pedido, 
-                                    "ativo": True, "filial": filial, "nf_devolucao": ""
-                                }
+                                status_inicial = calculate_status(data_saida, periodo)
+                                new_record = {"serial": serial, "hospital": hospital, "paciente": paciente, "medico": medico, "convenio": convenio, "data_registro": datetime.now().strftime("%Y-%m-%d"), "data_saida": data_saida_fmt, "periodo": int(periodo), "status": status_inicial, "nf": nf, "pedido": pedido, "ativo": True, "filial": filial, "nf_devolucao": ""}
                                 response = supabase.table("bombas").insert(new_record).execute()
                                 if response.data:
                                     bomba_id = response.data[0]["id"]
@@ -1263,36 +952,32 @@ def main():
     elif choice == "Bombas em Comodato":
         st.markdown('<h2 style="font-size: 1.25rem; margin-bottom: 1rem;">Bombas em Comodato</h2>', unsafe_allow_html=True)
         search_term = st.text_input("Pesquisar bombas em comodato (por Serial, Paciente ou Hospital)...", key="listagem_search")
-        
         with st.spinner("Carregando bombas..."):
             bombas_ativas = get_bombas(search_term, filial, active_only=True)
             bombas_df = get_dados_bombas_df()
-            nf_map = get_all_nfs_assinadas_info() # Pega o mapa de NFs uma vez
-        
+            nf_map = get_all_nfs_assinadas_info()
         display_bombas_table("Listagem de Bombas Ativas", bombas_ativas, bombas_df, nf_map)
         st.markdown("---")
-        
         excel_buffer = generate_excel_bombas_ativas(bombas_ativas, bombas_df, filial, nf_map)
         if excel_buffer:
             st.download_button(label="✅ Baixar Listagem em Comodato (Excel)", data=excel_buffer, file_name=f"bombas_comodato_{filial}_{datetime.now().strftime('%Y%m%d')}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-        
         st.markdown("---")
         st.markdown("### Gerenciamento de Bombas")
-        
         if not bombas_ativas:
             st.info("Não há bombas ativas para gerenciar.")
         else:
             tab_edit, tab_pdf, tab_anexar_nf, tab_download_nf = st.tabs(["📝 Editar Bomba", "🖨️ Gerar Documentos", "📎 Anexar NF Assinada", "📥 Baixar NF Assinada"])
             with tab_edit:
                 st.subheader("Editar Dados da Bomba")
-                bomba_to_edit = st.selectbox("Selecione uma bomba para editar:", options=bombas_ativas, format_func=lambda b: f"SERIAL: {b.get('serial', 'N/A')} | PACIENTE: {b.get('paciente', 'N/A')} | NF: {b.get('nf', 'N/A')}", key="edit_bomba_select", index=None, placeholder="Selecione uma bomba...")
+                bomba_to_edit = st.selectbox("Selecione uma bomba para editar:", options=bombas_ativas, format_func=lambda b: f"SERIAL: {b.get('serial', 'N/A')} | PACIENTE: {b.get('paciente', 'N/A')} | NF: {b.get('nf', 'N/A')}", key=f"edit_bomba_select_{st.session_state.bomba_edit_key}", index=None, placeholder="Selecione uma bomba...")
                 if bomba_to_edit:
                     with st.form(key=f"edit_form_{bomba_to_edit['id']}"):
                         try:
-                            current_data_saida = datetime.strptime(bomba_to_edit.get('data_saida', ''), '%d/%m/%Y').date()
+                            # Tenta converter a data de string (dd/mm/YYYY) para objeto date
+                            dt_obj = datetime.strptime(bomba_to_edit.get('data_saida'), '%d/%m/%Y').date()
+                            current_data_saida = dt_obj
                         except (ValueError, TypeError):
                             current_data_saida = None
-                        
                         c1, c2 = st.columns(2)
                         with c1:
                             serial = st.text_input("Serial*", value=bomba_to_edit.get('serial', '')).upper()
@@ -1306,7 +991,6 @@ def main():
                             nf = st.text_input("NF", value=bomba_to_edit.get('nf', '')).upper()
                         data_saida = st.date_input("Data de Saída*", value=current_data_saida, format="DD/MM/YYYY")
                         submitted = st.form_submit_button("Salvar Alterações")
-                        
                         if submitted:
                             if not all([serial, data_saida, periodo]) or not str(periodo).isdigit():
                                 st.error("ERRO: Preencha os campos obrigatórios (*) e verifique se o período é um número.")
@@ -1314,48 +998,36 @@ def main():
                                 with st.spinner("Atualizando dados..."):
                                     try:
                                         data_saida_fmt = data_saida.strftime("%Y-%m-%d")
-                                        new_status = calculate_status(data_saida, int(periodo))
+                                        # Passa o objeto 'data_saida' (date) que já é do tipo correto
+                                        new_status = calculate_status(data_saida, periodo)
                                         update_data = {"serial": serial, "paciente": paciente, "hospital": hospital, "medico": medico, "convenio": convenio, "periodo": int(periodo), "pedido": pedido, "nf": nf, "data_saida": data_saida_fmt, "status": new_status}
                                         supabase.table("bombas").update(update_data).eq("id", bomba_to_edit['id']).execute()
                                         register_event("bombas", bomba_to_edit['id'], f"DADOS DA BOMBA ATUALIZADOS (SERIAL: {serial})", filial)
                                         flush_events()
                                         st.session_state.messages.append({"text": "Dados da bomba atualizados!", "icon": "📝"})
                                         st.cache_data.clear()
+                                        st.session_state.bomba_edit_key += 1
                                         st.rerun()
                                     except Exception as e:
-                                        logging.error(f"Erro ao atualizar bomba: {e}")
                                         st.error(f"Ocorreu um erro ao salvar as alterações: {e}")
             with tab_pdf:
                 st.subheader("Gerar PDF do Contrato")
                 bomba_pdf = st.selectbox("Selecione uma bomba:", bombas_ativas, format_func=lambda b: f"SERIAL: {b.get('serial', 'N/A')} | PACIENTE: {b.get('paciente', 'N/A')} | NF: {b.get('nf', 'N/A')}", key="pdf_bomba_select", index=None, placeholder="Selecione uma bomba...")
-                if bomba_pdf:
-                    if st.button("Gerar e Baixar PDF", key="generate_pdf_button"):
-                        with st.spinner("Gerando PDF... Esta operação pode ser demorada."):
-                            pdf_bytes = generate_combined_pdf(bomba_pdf)
-                            if pdf_bytes:
-                                st.session_state.pdf_to_download = {
-                                    "data": pdf_bytes,
-                                    "name": f"documentos_{bomba_pdf['serial']}.pdf"
-                                }
-                                register_event("bombas", bomba_pdf['id'], "DOCUMENTOS GERADOS", filial)
-                                flush_events()
-                            else:
-                                st.error("Falha ao gerar o PDF.")
-                    
-                    if "pdf_to_download" in st.session_state:
-                        st.download_button(
-                            label="Clique aqui para Baixar o PDF Gerado", 
-                            data=st.session_state.pdf_to_download["data"], 
-                            file_name=st.session_state.pdf_to_download["name"], 
-                            mime="application/pdf"
-                        )
-                        del st.session_state.pdf_to_download
-
+                if bomba_pdf and st.button("Gerar e Baixar PDF", key="generate_pdf_button"):
+                    with st.spinner("Gerando PDF... Esta operação pode ser demorada."):
+                        pdf_bytes = generate_combined_pdf(bomba_pdf)
+                        if pdf_bytes:
+                            st.session_state.pdf_to_download = {"data": pdf_bytes, "name": f"documentos_{bomba_pdf['serial']}.pdf"}
+                            register_event("bombas", bomba_pdf['id'], "DOCUMENTOS GERADOS", filial)
+                            flush_events()
+                        else: st.error("Falha ao gerar o PDF.")
+                if "pdf_to_download" in st.session_state:
+                    st.download_button(label="Clique aqui para Baixar o PDF Gerado", data=st.session_state.pdf_to_download["data"], file_name=st.session_state.pdf_to_download["name"], mime="application/pdf")
+                    del st.session_state.pdf_to_download
             with tab_anexar_nf:
                 st.subheader("Anexar NF Assinada")
-                bombas_sem_nf = [bomba for bomba in bombas_ativas if not check_nf_assinada(bomba['serial'], nf_map)]
-                if not bombas_sem_nf:
-                    st.info("Todas as bombas nesta listagem já possuem NF assinada.")
+                bombas_sem_nf = [b for b in bombas_ativas if not check_nf_assinada(b['serial'], nf_map)]
+                if not bombas_sem_nf: st.info("Todas as bombas nesta listagem já possuem NF assinada.")
                 else:
                     bomba_anexar = st.selectbox("Selecione a bomba para anexar a NF:", bombas_sem_nf, format_func=lambda b: f"SERIAL: {b.get('serial', 'N/A')} | PACIENTE: {b.get('paciente', 'N/A')} | NF: {b.get('nf', 'N/A')}", key="anexar_nf_select")
                     nf_file = st.file_uploader("Anexar PDF da NF assinada", type=["pdf"], key="nf_assinada_upload")
@@ -1363,15 +1035,11 @@ def main():
                         with st.spinner("Enviando NF..."):
                             if upload_nf_assinada(bomba_anexar, nf_file):
                                 register_event("bombas", bomba_anexar["id"], f"NF ASSINADA ENVIADA (SERIAL: {bomba_anexar['serial']})", filial)
-                                flush_events()
-                                st.session_state.messages.append({"text": "NF assinada enviada com sucesso!", "icon": "📎"})
-                                st.cache_data.clear() # Limpa o cache para refletir a mudança
-                                st.rerun()
+                                flush_events(); st.session_state.messages.append({"text": "NF assinada enviada com sucesso!", "icon": "📎"}); st.cache_data.clear(); st.rerun()
             with tab_download_nf:
                 st.subheader("Baixar NF Assinada")
-                bombas_com_nf = [bomba for bomba in bombas_ativas if check_nf_assinada(bomba['serial'], nf_map)]
-                if not bombas_com_nf:
-                    st.info("Nenhuma bomba nesta listagem possui NF assinada para download.")
+                bombas_com_nf = [b for b in bombas_ativas if check_nf_assinada(b['serial'], nf_map)]
+                if not bombas_com_nf: st.info("Nenhuma bomba nesta listagem possui NF assinada para download.")
                 else:
                     bomba_selecionada = st.selectbox("Selecione a bomba para baixar a NF:", bombas_com_nf, format_func=lambda b: f"SERIAL: {b.get('serial', 'N/A')} | PACIENTE: {b.get('paciente', 'N/A')} | NF: {b.get('nf', 'N/A')}", key="download_nf_select")
                     if st.button("Baixar NF Assinada", key="baixar_nf_button_tab", disabled=not bomba_selecionada):
@@ -1380,8 +1048,7 @@ def main():
                             if nf_data:
                                 nf_filename_path = get_nf_assinada_filename(bomba_selecionada['serial'], nf_map)
                                 st.download_button(label="Clique aqui para baixar", data=nf_data, file_name=os.path.basename(nf_filename_path), mime="application/pdf")
-                            else:
-                                st.error("Erro ao encontrar a NF para download.")
+                            else: st.error("Erro ao encontrar a NF para download.")
 
     elif choice == "Devolver":
         st.markdown('<h2 style="font-size: 1.25rem; margin-bottom: 1rem;">Devolver Bomba</h2>', unsafe_allow_html=True)
@@ -1395,22 +1062,28 @@ def main():
                 data_retorno = st.date_input("📅 Data de Retorno", value=datetime.now(), format="DD/MM/YYYY")
                 nf_devolucao = st.text_input("🧾 NF de Devolução*", placeholder="Ex.: 987654").upper()
                 submitted = st.form_submit_button("Confirmar Devolução")
-                
                 if submitted:
                     if not nf_devolucao or not bomba:
                         st.error("Selecione uma bomba e preencha a NF de Devolução.")
                     else:
                         try:
-                            with st.spinner("Registrando devolução..."):
-                                supabase.table("bombas").update({
-                                    "ativo": False, 
-                                    "status": "✅ DEVOLVIDA", 
-                                    "data_retorno": data_retorno.strftime("%Y-%m-%d"), 
-                                    "nf_devolucao": nf_devolucao
-                                }).eq("id", bomba["id"]).execute()
+                            with st.spinner("Registrando devolução e desvinculando NF antiga..."):
+                                serial_devolvido = bomba['serial']
+                                nf_map = get_all_nfs_assinadas_info()
+                                nf_assinada_path = get_nf_assinada_filename(serial_devolvido, nf_map)
+                                if nf_assinada_path:
+                                    try:
+                                        supabase.storage.from_("controle-de-bombas-suplen-files").remove([nf_assinada_path])
+                                        msg_sucesso = f"Bomba {serial_devolvido} devolvida e NF assinada anterior desvinculada!"
+                                    except Exception as e_storage:
+                                        st.warning(f"Atenção: Erro ao remover a NF assinada anterior: {e_storage}")
+                                        msg_sucesso = f"Bomba {serial_devolvido} devolvida (com aviso)."
+                                else:
+                                    msg_sucesso = "Bomba devolvida com sucesso!"
+                                supabase.table("bombas").update({"ativo": False, "status": "✅ DEVOLVIDA", "data_retorno": data_retorno.strftime("%Y-%m-%d"), "nf_devolucao": nf_devolucao}).eq("id", bomba["id"]).execute()
                                 register_event("bombas", bomba["id"], f"BOMBA DEVOLVIDA (SERIAL: {bomba['serial']}) NF: {nf_devolucao}", filial)
                                 flush_events()
-                                st.session_state.messages.append({"text": "Bomba devolvida com sucesso!", "icon": "✅"})
+                                st.session_state.messages.append({"text": msg_sucesso, "icon": "✅"})
                                 st.cache_data.clear()
                                 st.rerun()
                         except Exception as e:
@@ -1430,7 +1103,6 @@ def main():
                 with c2:
                     nf_numero = st.text_input("🧾 NÚMERO DA NF EMITIDA*", placeholder="Ex.: 123456").upper()
                     nf_file = st.file_uploader("📄 UPLOAD NF (PDF)*", type=["pdf"], key="nf_upload")
-                
                 submit_button = st.form_submit_button("Registrar Manutenção")
                 if submit_button:
                     if not all([serial, defeito, nf_numero, nf_file]):
@@ -1443,12 +1115,7 @@ def main():
                             else:
                                 data_registro_str = datetime.now().strftime("%d/%m/%Y")
                                 if upload_nf_pdf(serial, data_registro_str, nf_file):
-                                    response = supabase.table("manutencao").insert({
-                                        "serial": serial, "defeito": defeito, 
-                                        "data_registro": datetime.now().strftime("%Y-%m-%d"), 
-                                        "nf_numero": nf_numero, "nf_status": "Enviada", 
-                                        "status": "Em Manutenção", "filial": filial
-                                    }).execute()
+                                    response = supabase.table("manutencao").insert({"serial": serial, "defeito": defeito, "data_registro": datetime.now().strftime("%Y-%m-%d"), "nf_numero": nf_numero, "nf_status": "Enviada", "status": "Em Manutenção", "filial": filial}).execute()
                                     manutencao_id = response.data[0]["id"]
                                     register_event("manutencao", manutencao_id, f"MANUTENÇÃO REGISTRADA (SERIAL: {serial})", filial)
                                     flush_events()
@@ -1460,15 +1127,12 @@ def main():
             search_term_manut = st.text_input("Pesquisar manutenções...", key="manutencao_search")
             with st.spinner("Carregando manutenções..."):
                 manutencoes = get_manutencao(search_term_manut, filial)
-            
             display_manutencao_table("Manutenções Registradas", manutencoes)
-            
 
     elif choice == "Histórico Devolvidas":
         st.markdown('<h2 style="font-size: 1.25rem; margin-bottom: 1rem;">Histórico de Bombas Devolvidas</h2>', unsafe_allow_html=True)
         search_term = st.text_input("Pesquisar no histórico (serial, NF, etc.)...", key="historico_search")
         historico = get_historico_devolvidas(filial if not st.session_state.get("general_mode", False) else None)
-        
         if not historico:
             st.info("Nenhuma bomba devolvida registrada.")
         else:
@@ -1477,12 +1141,10 @@ def main():
             if search_term:
                 df = df[df.apply(lambda row: search_term.lower() in str(row.values).lower(), axis=1)]
             st.dataframe(df, use_container_width=True, hide_index=True)
-            
+
     elif choice == "Saldo Curativo":
         st.markdown('<h2 style="font-size: 1.25rem; margin-bottom: 1rem;">Saldo de Curativos</h2>', unsafe_allow_html=True)
-        
         search_term = st.text_input("Pesquisar por Descrição do Produto...", key="saldo_curativo_search")
-
         st.markdown("---")
         st.markdown("<h6>Legenda de Validade</h6>", unsafe_allow_html=True)
         col1, col2, col3 = st.columns(3)
@@ -1490,48 +1152,31 @@ def main():
         col2.markdown('<div style="background-color: #FFD580; color: black; text-align: center; padding: 10px; border-radius: 5px;"><strong>ATENÇÃO</strong><br>2 a 3 meses</div>', unsafe_allow_html=True)
         col3.markdown('<div style="background-color: #F08080; color: black; text-align: center; padding: 10px; border-radius: 5px;"><strong>CRÍTICO</strong><br>&lt; 2 meses</div>', unsafe_allow_html=True)
         st.markdown("---")
-        
         df_curativos = get_saldo_curativo_data()
-
         if df_curativos.empty:
             st.info("Nenhum dado de saldo de curativo encontrado.")
         else:
             df_para_exibir = df_curativos.copy()
-            
             if search_term:
                 df_para_exibir = df_para_exibir[df_para_exibir['Desc_Produto'].str.contains(search_term, case=False, na=False)]
-
             if not df_para_exibir.empty:
                 df_para_exibir['Data_Validad'] = pd.to_datetime(df_para_exibir['Data_Validad'], errors='coerce')
                 df_para_exibir.dropna(subset=['Data_Validad'], inplace=True)
                 df_para_exibir = df_para_exibir.sort_values(by=['Data_Validad', 'Desc_Produto'])
-
                 df_display = df_para_exibir[['Produto', 'Desc_Produto', 'Referencia', 'Lote', 'Data_Validad', 'Saldo_Lote']].copy()
-                df_display.rename(columns={
-                    'Desc_Produto': 'Descrição do Produto', 'Referencia': 'Referência',
-                    'Data_Validad': 'Data de Validade', 'Saldo_Lote': 'Saldo do Lote'
-                }, inplace=True)
-
+                df_display.rename(columns={'Desc_Produto': 'Descrição do Produto', 'Referencia': 'Referência', 'Data_Validad': 'Data de Validade', 'Saldo_Lote': 'Saldo do Lote'}, inplace=True)
                 def style_validade(row):
                     hoje = datetime.now()
                     diferenca_dias = (row['Data de Validade'] - hoje).days if pd.notna(row['Data de Validade']) else -999
-                    bg_color = 'background-color: #F08080;' # Crítico/Vencido
-                    if diferenca_dias > 90:
-                        bg_color = 'background-color: #90ee90;' # Normal
-                    elif 60 <= diferenca_dias <= 90:
-                        bg_color = 'background-color: #FFD580;' # Atenção
+                    bg_color = 'background-color: #F08080;'
+                    if diferenca_dias > 90: bg_color = 'background-color: #90ee90;'
+                    elif 60 <= diferenca_dias <= 90: bg_color = 'background-color: #FFD580;'
                     return [f"color: black; {bg_color}"] * len(row)
-
                 styler = df_display.style.apply(style_validade, axis=1).format({'Data de Validade': '{:%d/%m/%Y}'})
                 st.dataframe(styler, use_container_width=True, hide_index=True)
-
                 excel_data = generate_excel_saldo_curativo(styler.data)
                 if excel_data:
-                    st.download_button(
-                        label="✅ Baixar Saldo em Excel", data=excel_data,
-                        file_name=f"saldo_curativo_{datetime.now().strftime('%Y%m%d')}.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    )
+                    st.download_button(label="✅ Baixar Saldo em Excel", data=excel_data, file_name=f"saldo_curativo_{datetime.now().strftime('%Y%m%d')}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
             else:
                 st.info("Nenhum produto encontrado com os termos da busca.")
 
