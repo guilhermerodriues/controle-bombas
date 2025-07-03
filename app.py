@@ -403,45 +403,18 @@ def get_historico_devolvidas(filial=None):
 @st.cache_data(ttl=300, show_spinner="Carregando dados de curativos...")
 def get_saldo_curativo_data():
     try:
-        # Busca todos os dados do banco
+        # Busca dados do banco
         response = supabase.table("saldo_curativo").select("*").execute()
         data = response.data
         if not data:
             return pd.DataFrame()
             
-        # Converte para DataFrame
+        # Converte para DataFrame e remove duplicatas
         df = pd.DataFrame(data)
-        total_registros = len(df)
-        
-        # Identifica duplicatas baseado em todas as colunas relevantes
         df_sem_duplicatas = df.drop_duplicates(
             subset=['Produto', 'Desc_Produto', 'Referencia', 'Lote', 'Data_Validad', 'Saldo_Lote']
         )
-        registros_unicos = len(df_sem_duplicatas)
         
-        # Se encontrou duplicatas, mostra informação
-        if total_registros > registros_unicos:
-            duplicatas = total_registros - registros_unicos
-            st.sidebar.warning(f"""
-                ⚠️ Atenção: Foram encontradas duplicatas no banco
-                - Total de registros: {total_registros}
-                - Registros únicos: {registros_unicos}
-                - Duplicatas removidas: {duplicatas}
-            """)
-            
-            # Mostra as linhas que estão duplicadas
-            linhas_duplicadas = df[df.duplicated(
-                subset=['Produto', 'Desc_Produto', 'Referencia', 'Lote', 'Data_Validad', 'Saldo_Lote'],
-                keep=False
-            )]
-            if not linhas_duplicadas.empty:
-                with st.sidebar.expander("Ver registros duplicados"):
-                    st.dataframe(
-                        linhas_duplicadas.sort_values(by=['Produto', 'Lote']),
-                        use_container_width=True
-                    )
-        
-        # Retorna o DataFrame sem duplicatas
         return df_sem_duplicatas
         
     except Exception as e:
