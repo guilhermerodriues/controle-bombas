@@ -1162,8 +1162,15 @@ def main():
             if not df_para_exibir.empty:
                 df_para_exibir['Data_Validad'] = pd.to_datetime(df_para_exibir['Data_Validad'], errors='coerce')
                 df_para_exibir.dropna(subset=['Data_Validad'], inplace=True)
-                df_para_exibir = df_para_exibir.sort_values(by=['Data_Validad', 'Desc_Produto'])
-                df_display = df_para_exibir[['Produto', 'Desc_Produto', 'Referencia', 'Lote', 'Data_Validad', 'Saldo_Lote']].copy()
+                
+                # Agrupar por Desc_Produto, Referencia, Lote e Data de Validade, somando os saldos
+                df_grouped = df_para_exibir.groupby(['Desc_Produto', 'Referencia', 'Lote', 'Data_Validad']).agg({
+                    'Produto': 'first',  # Pega o primeiro valor
+                    'Saldo_Lote': 'sum'  # Soma todos os saldos
+                }).reset_index()
+                
+                df_grouped = df_grouped.sort_values(by=['Data_Validad', 'Desc_Produto'])
+                df_display = df_grouped[['Produto', 'Desc_Produto', 'Referencia', 'Lote', 'Data_Validad', 'Saldo_Lote']].copy()
                 df_display.rename(columns={'Desc_Produto': 'Descrição do Produto', 'Referencia': 'Referência', 'Data_Validad': 'Data de Validade', 'Saldo_Lote': 'Saldo do Lote'}, inplace=True)
                 def style_validade(row):
                     hoje = datetime.now()
