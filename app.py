@@ -538,7 +538,7 @@ def generate_combined_pdf(bomba_data):
                             if key in inline[i].text: inline[i].text = inline[i].text.replace(key, str(value))
             doc.save(temp_docx_path)
             temp_pdf_path = os.path.join(temp_dir, f"contrato_{bomba_data['serial']}.pdf")
-            if not convert_docx_to_pdf(temp_pdf_path, temp_pdf_path): return None
+            if not convert_docx_to_pdf(temp_docx_path, temp_pdf_path): return None
             merger = PdfMerger()
             merger.append(temp_pdf_path)
             pdf_serial_content = download_file_from_storage(f"pdfs/{bomba_data['serial']}.pdf")
