@@ -31,7 +31,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 
 # Configuração da página
 st.set_page_config(
-    page_title="Controle de Bombas de Sucção",
+    page_title="Controle de Equipamentos",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -666,8 +666,8 @@ def generate_excel_bombas_ativas(bombas, bombas_df, filial, nf_map):
     return buffer
 
 def main():
-    st.markdown('<h1 class="main-title">Controle de Bombas de Sucção</h1>', unsafe_allow_html=True)
-    st.markdown('<p class="subtitle">Desenvolvido por Guilherme Rodrigues – Suplen Médical</p>', unsafe_allow_html=True)
+    st.markdown('<h1 class="main-title">Controle de Equipamentos</h1>', unsafe_allow_html=True)
+    st.markdown('<p class="subtitle">Suplen Medical</p>', unsafe_allow_html=True)
     
     if 'bomba_edit_key' not in st.session_state:
         st.session_state.bomba_edit_key = 0
