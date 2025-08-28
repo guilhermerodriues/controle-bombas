@@ -5,6 +5,8 @@ import sys
 import logging
 import tempfile
 from datetime import datetime, timedelta, timezone
+import hashlib
+import time
 import pandas as pd
 from io import BytesIO
 from docx import Document
@@ -17,11 +19,8 @@ from supabase import create_client, Client
 from dotenv import load_dotenv
 from analyze_curativo import analyze_curativo
 import subprocess
-
-
-
-
-# A importação incorreta de 'docx2pdf' foi REMOVIDA daqui.
+from streamlit_qrcode_scanner import qrcode_scanner
+from streamlit_geolocation import streamlit_geolocation
 
 # Carregar variáveis de ambiente
 load_dotenv()
@@ -81,9 +80,9 @@ st.markdown("""
         .form-column { flex: 1; min-width: 300px; }
         .stDataFrame { border-radius: 8px; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1); }
         .stDataFrame table { width: 100%; table-layout: auto; }
-        .stDataFrame th, .stDataFrame td { 
-            padding: 8px; border: 1px solid #ddd; text-align: left; 
-            white-space: nowrap; overflow: hidden; text-overflow: ellipsis; 
+        .stDataFrame th, .stDataFrame td {
+            padding: 8px; border: 1px solid #ddd; text-align: left;
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
         }
         .stMetric { background-color: #f9fafb; border-radius: 8px; padding: 16px; box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05); }
         .stMetric * { color: #000000 !important; }
@@ -117,34 +116,24 @@ CONTRATO_LOCAL_PATH = "contrato.docx"
 CONTRATO_STORAGE_PATH = "contratos/contrato.docx"
 MAINTENANCE_STORAGE_PATH = "nfs/"
 
-# Função para normalizar texto
 def normalize_text(text):
     if not isinstance(text, str):
         return ""
     return unicodedata.normalize('NFKD', text).encode('ASCII', 'ignore').decode('ASCII').upper().strip()
 
-# --- INÍCIO DA NOVA FUNÇÃO CENTRALIZADA PARA DATAS ---
 def parse_supabase_date(date_string: str | None) -> datetime | None:
-    """
-    Converte com segurança uma string de data do Supabase para um objeto datetime,
-    lidando com o sufixo 'Z' para compatibilidade entre versões do Python.
-    """
     if not date_string or not isinstance(date_string, str):
         return None
     try:
-        # Garante compatibilidade com Python < 3.11 que não lida com 'Z' nativamente
         if date_string.endswith('Z'):
             date_string = date_string[:-1] + '+00:00'
         return datetime.fromisoformat(date_string)
     except (ValueError, TypeError):
         logging.warning(f"Não foi possível converter a string de data: {date_string}")
         return None
-# --- FIM DA NOVA FUNÇÃO ---
 
-# Dicionário de senhas para filiais
 FILIAIS_PASSWORDS = {filial: normalize_text(filial) + "123" for filial in FILIAIS}
 
-# Inicializar Supabase
 @st.cache_resource
 def init_supabase():
     try:
@@ -160,6 +149,24 @@ def init_supabase():
         logging.error(f"Erro ao inicializar Supabase: {e}")
         st.error(f"Erro ao conectar ao Supabase: {e}")
         st.stop()
+    
+
+def safe_rerun():
+    """Try to rerun the Streamlit script in a way compatible across versions."""
+    try:
+        if hasattr(st, 'experimental_rerun'):
+            st.experimental_rerun()
+            return
+    except Exception:
+        pass
+    # Fallback: mutate query params to trigger rerun
+    try:
+        params = st.experimental_get_query_params()
+        params['_rerun'] = [str(int(time.time()))]
+        st.experimental_set_query_params(**params)
+    except Exception:
+        # Last resort: raise to stop execution (will show error)
+        raise
 supabase = init_supabase()
 
 # -------------------- FUNÇÕES AUXILIARES OTIMIZADAS --------------------
@@ -176,6 +183,47 @@ def download_file_from_storage(storage_path):
             return None
         logging.error(f"Erro ao baixar {storage_path}: {str(e)}")
         return None
+
+
+# Autenticação removida: o app roda sem login de usuário; registros usam `st.session_state['user_email']` padrão.
+
+
+def get_location(prefix: str = "local") -> dict | None:
+    """Tenta obter localização automática via streamlit_geolocation(); se não, permite entrada manual.
+
+    Retorna dict com keys 'latitude' e 'longitude' ou None.
+    """
+    try:
+        loc = streamlit_geolocation()
+    except Exception as e:
+        logging.debug(f"streamlit_geolocation falhou: {e}")
+        loc = None
+
+    lat = None
+    lon = None
+    if loc:
+        # tenta várias chaves possíveis
+        lat = loc.get('latitude') or loc.get('lat') or (loc.get('coords') or {}).get('latitude')
+        lon = loc.get('longitude') or loc.get('lon') or (loc.get('coords') or {}).get('longitude')
+
+    if lat and lon:
+        try:
+            lat_val = float(lat)
+            lon_val = float(lon)
+            st.caption(f"Localização detectada automaticamente: {lat_val:.6f}, {lon_val:.6f}")
+            return {"latitude": lat_val, "longitude": lon_val}
+        except Exception:
+            pass
+
+    st.warning("Localização automática não disponível. Selecione manualmente ou permita acesso ao GPS no navegador.")
+    manual_lat = st.text_input(f"Latitude manual ({prefix})", value=str(lat) if lat else "", key=f"manual_lat_{prefix}")
+    manual_lon = st.text_input(f"Longitude manual ({prefix})", value=str(lon) if lon else "", key=f"manual_lon_{prefix}")
+    try:
+        if manual_lat and manual_lon:
+            return {"latitude": float(manual_lat), "longitude": float(manual_lon)}
+    except Exception:
+        st.error("Coordenadas manuais inválidas. Use formato decimal (ex: -15.794229, -47.882166).")
+    return None
 
 @st.cache_data(ttl=300)
 def get_dados_bombas_df():
@@ -274,13 +322,15 @@ def setup_filial():
 
 # -------------------- LÓGICA DE DADOS OTIMIZADA --------------------
 def calculate_status(data_saida, periodo):
-    logging.info(f"Calculando status com data_saida: {data_saida} (tipo: {type(data_saida)}) e periodo: {periodo} (tipo: {type(periodo)})")
     if not data_saida or not periodo:
         return "Indefinido"
     try:
-        data_devolucao = data_saida + timedelta(days=int(periodo))
-        # ### CORREÇÃO PRINCIPAL ###
-        # Compara data com data, usando .date() para remover a informação de hora
+        if isinstance(data_saida, datetime):
+            data_saida_date = data_saida.date()
+        else:
+            data_saida_date = data_saida
+
+        data_devolucao = data_saida_date + timedelta(days=int(periodo))
         dias_restantes = (data_devolucao - datetime.now().date()).days
         if dias_restantes < 0:
             return "Fora Prazo"
@@ -291,13 +341,17 @@ def calculate_status(data_saida, periodo):
         logging.error(f"Erro em calculate_status: {e}")
         return "Data Inválida"
 
-def register_event(table, record_id, description, filial):
+def register_event(table, record_id, description, filial, usuario="N/A"):
     if "event_buffer" not in st.session_state:
         st.session_state.event_buffer = []
+
+    full_description = f"{description.upper()} (USUÁRIO: {usuario})"
+
     st.session_state.event_buffer.append({
         "data_evento": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "descricao": description.upper(),
-        "filial": filial
+        "descricao": full_description,
+        "filial": filial,
+        "usuario": usuario
     })
 
 def flush_events():
@@ -329,13 +383,12 @@ def get_bombas(search_term="", filial=None, active_only=True):
                     result.append(bomba)
             bombas = result
         for bomba in bombas:
-            bomba["id"] = str(bomba["id"])
+            # Mantém o ID como integer/uuid original, mas cria uma chave de string para widgets
+            bomba["id_str"] = str(bomba["id"])
             for field in ["data_saida", "data_registro", "data_retorno"]:
-                # --- USO DA NOVA FUNÇÃO DE DATA ---
                 dt_obj = parse_supabase_date(bomba.get(field))
                 if dt_obj:
                     bomba[field] = dt_obj.strftime("%d/%m/%Y")
-        logging.info(f"Busca de bombas retornou {len(bombas)} registros.")
         return bombas
     except Exception as e:
         logging.error(f"Erro ao buscar bombas: {e}")
@@ -370,10 +423,7 @@ def get_manutencao(search_term="", filial=None):
         merged_df['modelo'] = merged_df['Modelo'].fillna("N/A")
         merged_df['ultima_manut'] = pd.to_datetime(merged_df['Ultima_Manut'], errors='coerce').dt.strftime('%d/%m/%Y').fillna("N/A")
         merged_df['venc_manut'] = pd.to_datetime(merged_df['Venc_Manut'], errors='coerce').dt.strftime('%d/%m/%Y').fillna("N/A")
-        
-        # --- USO DA NOVA FUNÇÃO DE DATA ---
         merged_df['data_registro'] = merged_df['data_registro'].apply(lambda x: (parse_supabase_date(x).strftime('%d/%m/%Y') if parse_supabase_date(x) else "N/A"))
-
         merged_df['id'] = merged_df['id'].astype(str)
         return merged_df.to_dict('records')
     except Exception as e:
@@ -390,7 +440,6 @@ def get_historico_devolvidas(filial=None):
         historico = query.execute().data
         for doc in historico:
             doc["id"] = str(doc["id"])
-            # --- USO DA NOVA FUNÇÃO DE DATA ---
             dt_obj = parse_supabase_date(doc.get("data_evento"))
             if dt_obj:
                 doc["data_evento"] = dt_obj.strftime("%d/%m/%Y, %H:%M")
@@ -403,20 +452,15 @@ def get_historico_devolvidas(filial=None):
 @st.cache_data(ttl=300, show_spinner="Carregando dados de curativos...")
 def get_saldo_curativo_data():
     try:
-        # Busca dados do banco
         response = supabase.table("saldo_curativo").select("*").execute()
         data = response.data
         if not data:
             return pd.DataFrame()
-            
-        # Converte para DataFrame e remove duplicatas
         df = pd.DataFrame(data)
         df_sem_duplicatas = df.drop_duplicates(
             subset=['Produto', 'Desc_Produto', 'Referencia', 'Lote', 'Data_Validad', 'Saldo_Lote']
         )
-        
         return df_sem_duplicatas
-        
     except Exception as e:
         logging.error(f"Erro ao carregar dados da tabela saldo_curativo: {e}")
         st.error(f"Não foi possível carregar os dados de saldo de curativos: {e}")
@@ -632,7 +676,7 @@ def display_manutencao_table(title, manutencoes):
             try:
                 with st.spinner("Atualizando status..."):
                     supabase.table("manutencao").update({"status": "Devolvida"}).eq("id", selected_manut["id"]).execute()
-                    register_event("manutencao", selected_manut["id"], f"BOMBA DEVOLVIDA APÓS MANUTENÇÃO (SERIAL: {selected_manut['serial']})", selected_manut['filial'])
+                    register_event("manutencao", selected_manut["id"], f"BOMBA DEVOLVIDA APÓS MANUTENÇÃO (SERIAL: {selected_manut['serial']})", selected_manut['filial'], st.session_state.get('user_email', 'N/A'))
                     flush_events(); st.session_state.messages.append({"text": f"Bomba {selected_manut['serial']} marcada como devolvida!", "icon": "✅"}); st.cache_data.clear(); st.rerun()
             except Exception as e: st.error(f"Erro ao marcar como devolvida: {e}")
     else: st.info("Nenhuma bomba 'Em Manutenção' para realizar ações.")
@@ -672,23 +716,42 @@ def main():
     if 'bomba_edit_key' not in st.session_state:
         st.session_state.bomba_edit_key = 0
 
+    # Autenticação removida: tenta detectar e-mail do usuário via variáveis de ambiente
+    # (útil em ambientes que expõem o usuário autenticado). Caso contrário, usa 'system'.
+    user_email_env = os.getenv('STREAMLIT_USER_EMAIL') or os.getenv('USER_EMAIL') or os.getenv('EMAIL')
+    if user_email_env:
+        st.session_state.user_email = user_email_env
+    else:
+        if 'user_email' not in st.session_state:
+            st.session_state.user_email = 'system'
     filial = setup_filial()
     if not filial and not st.session_state.get("general_mode", False):
         st.sidebar.warning("Por favor, selecione e confirme uma filial para continuar.")
-        return
+
+    # Usuário é determinado por variáveis de ambiente quando disponíveis; caso contrário, 'system'
+
     if filial:
         st.markdown(f'<p class="filial-main">Filial: {filial}</p>', unsafe_allow_html=True)
     else:
         st.markdown(f'<p class="filial-main">Dashboard Geral</p>', unsafe_allow_html=True)
+
     if "messages" not in st.session_state:
         st.session_state.messages = []
     for msg in st.session_state.messages:
         st.toast(msg['text'], icon=msg['icon'])
     st.session_state.messages = []
-    menu = ["Dashboard", "Registrar", "Bombas em Comodato", "Devolver", "Manutenção de Bombas", "Histórico Devolvidas", "Saldo Curativo"]
+
+    menu = ["Dashboard", "Registrar", "Bombas em Comodato", "Coletar / Entregar Bomba", "Devolver", "Manutenção de Bombas", "Histórico Devolvidas", "Saldo Curativo"]
     if st.session_state.get("general_mode", False):
         menu = ["Dashboard Geral"]
-    choice = st.sidebar.selectbox("Navegação", menu, format_func=lambda x: f"📋 {x}")
+
+    # Mostrar navegação apenas se o usuário estiver logado
+    logged_in = bool(st.session_state.get('user') or (st.session_state.get('user_email') and st.session_state.get('user_email') != 'system'))
+    if logged_in:
+        choice = st.sidebar.selectbox("Navegação", menu, format_func=lambda x: f"📋 {x}")
+    else:
+        st.sidebar.info("Faça login para acessar a navegação.")
+        choice = None
 
     if choice == "Dashboard":
         st.markdown('<h2 style="font-size: 1.25rem; margin-bottom: 1rem;">Dashboard da Filial</h2>', unsafe_allow_html=True)
@@ -946,7 +1009,7 @@ def main():
                                 response = supabase.table("bombas").insert(new_record).execute()
                                 if response.data:
                                     bomba_id = response.data[0]["id"]
-                                    register_event("bombas", bomba_id, f"BOMBA REGISTRADA (SERIAL: {serial})", filial)
+                                    register_event("bombas", bomba_id, f"BOMBA REGISTRADA (SERIAL: {serial})", filial, st.session_state.user_email)
                                     flush_events()
                                     st.session_state.messages.append({"text": "Bomba registrada com sucesso!", "icon": "✅"})
                                     st.cache_data.clear()
@@ -979,9 +1042,8 @@ def main():
                 st.subheader("Editar Dados da Bomba")
                 bomba_to_edit = st.selectbox("Selecione uma bomba para editar:", options=bombas_ativas, format_func=lambda b: f"SERIAL: {b.get('serial', 'N/A')} | PACIENTE: {b.get('paciente', 'N/A')} | NF: {b.get('nf', 'N/A')}", key=f"edit_bomba_select_{st.session_state.bomba_edit_key}", index=None, placeholder="Selecione uma bomba...")
                 if bomba_to_edit:
-                    with st.form(key=f"edit_form_{bomba_to_edit['id']}"):
+                    with st.form(key=f"edit_form_{bomba_to_edit['id_str']}"):
                         try:
-                            # Tenta converter a data de string (dd/mm/YYYY) para objeto date
                             dt_obj = datetime.strptime(bomba_to_edit.get('data_saida'), '%d/%m/%Y').date()
                             current_data_saida = dt_obj
                         except (ValueError, TypeError):
@@ -1006,11 +1068,10 @@ def main():
                                 with st.spinner("Atualizando dados..."):
                                     try:
                                         data_saida_fmt = data_saida.strftime("%Y-%m-%d")
-                                        # Passa o objeto 'data_saida' (date) que já é do tipo correto
                                         new_status = calculate_status(data_saida, periodo)
                                         update_data = {"serial": serial, "paciente": paciente, "hospital": hospital, "medico": medico, "convenio": convenio, "periodo": int(periodo), "pedido": pedido, "nf": nf, "data_saida": data_saida_fmt, "status": new_status}
                                         supabase.table("bombas").update(update_data).eq("id", bomba_to_edit['id']).execute()
-                                        register_event("bombas", bomba_to_edit['id'], f"DADOS DA BOMBA ATUALIZADOS (SERIAL: {serial})", filial)
+                                        register_event("bombas", bomba_to_edit['id'], f"DADOS DA BOMBA ATUALIZADOS (SERIAL: {serial})", filial, st.session_state.user_email)
                                         flush_events()
                                         st.session_state.messages.append({"text": "Dados da bomba atualizados!", "icon": "📝"})
                                         st.cache_data.clear()
@@ -1026,7 +1087,7 @@ def main():
                         pdf_bytes = generate_combined_pdf(bomba_pdf)
                         if pdf_bytes:
                             st.session_state.pdf_to_download = {"data": pdf_bytes, "name": f"documentos_{bomba_pdf['serial']}.pdf"}
-                            register_event("bombas", bomba_pdf['id'], "DOCUMENTOS GERADOS", filial)
+                            register_event("bombas", bomba_pdf['id'], "DOCUMENTOS GERADOS", filial, st.session_state.user_email)
                             flush_events()
                         else: st.error("Falha ao gerar o PDF.")
                 if "pdf_to_download" in st.session_state:
@@ -1042,7 +1103,7 @@ def main():
                     if st.button("Enviar NF Assinada", disabled=(not bomba_anexar or not nf_file)):
                         with st.spinner("Enviando NF..."):
                             if upload_nf_assinada(bomba_anexar, nf_file):
-                                register_event("bombas", bomba_anexar["id"], f"NF ASSINADA ENVIADA (SERIAL: {bomba_anexar['serial']})", filial)
+                                register_event("bombas", bomba_anexar["id"], f"NF ASSINADA ENVIADA (SERIAL: {bomba_anexar['serial']})", filial, st.session_state.user_email)
                                 flush_events(); st.session_state.messages.append({"text": "NF assinada enviada com sucesso!", "icon": "📎"}); st.cache_data.clear(); st.rerun()
             with tab_download_nf:
                 st.subheader("Baixar NF Assinada")
@@ -1058,17 +1119,214 @@ def main():
                                 st.download_button(label="Clique aqui para baixar", data=nf_data, file_name=os.path.basename(nf_filename_path), mime="application/pdf")
                             else: st.error("Erro ao encontrar a NF para download.")
 
+    # <-- INÍCIO: SEÇÃO DE COLETA COMPLETAMENTE REFEITA -->
+    elif choice == "Coletar / Entregar Bomba":
+        st.markdown('<h2 style="font-size: 1.25rem; margin-bottom: 1rem;">Coleta e Entrega de Bombas</h2>', unsafe_allow_html=True)
+        nome_usuario = st.session_state.user['nome'] if 'user' in st.session_state and st.session_state.user.get('nome') else st.session_state.user_email
+        st.info(f"Usuário logado: **{nome_usuario}**")
+
+        dados_bombas_gerais_df = get_dados_bombas_df()
+
+        tab1, tab2 = st.tabs(["📲 Coletar Bomba", "📦 Minhas Coletas Pendentes"])
+
+        with tab1:
+            # Gerencia o estado de ativação do scanner
+            if 'scanner_ativo' not in st.session_state:
+                st.session_state.scanner_ativo = False
+
+            # Se uma bomba foi lida, exibe as informações para confirmação
+            if 'bomba_para_coleta' in st.session_state:
+                bomba = st.session_state.bomba_para_coleta
+                
+                with st.container(border=True):
+                    st.success(f"Bomba encontrada!")
+                    st.markdown(f"**SERIAL:** `{bomba.get('serial', 'N/A')}`")
+                    st.markdown(f"**MODELO:** `{bomba.get('modelo', 'N/A')}`")
+                    st.markdown(f"**HOSPITAL:** `{bomba.get('hospital', 'N/A')}`")
+                    st.markdown(f"**PACIENTE:** `{bomba.get('paciente', 'N/A')}`")
+                    st.markdown("---")
+                
+                location_coleta = get_location(prefix="coleta")
+
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.button("✅ Confirmar Coleta", key="confirmar_coleta", type="primary"):
+                        with st.spinner("Registrando coleta..."):
+                            try:
+                                # Usa o ID tal como está (pode ser UUID/string); evita conversão inválida para int
+                                bomba_id = bomba["id"]
+
+                                insert_data = {
+                                    "bomba_id": bomba_id,
+                                    "serial": bomba["serial"],
+                                    "usuario_coleta": st.session_state.user_email,
+                                    "data_coleta": datetime.now().isoformat(),
+                                    "status": "COLETADA",
+                                    "filial": filial
+                                }
+                                if location_coleta and location_coleta.get('latitude'):
+                                    insert_data['lat_coleta'] = location_coleta['latitude']
+                                    insert_data['lon_coleta'] = location_coleta['longitude']
+
+                                response = supabase.table("coletas").insert(insert_data).execute()
+
+                                # Verifica se a inserção deu certo
+                                if response.data:
+                                    register_event("coletas", bomba_id, f"BOMBA COLETADA (SERIAL: {bomba['serial']})", filial, st.session_state.user_email)
+                                    flush_events()
+                                    st.session_state.messages.append({"text": "Bomba coletada com sucesso!", "icon": "📲"})
+                                    # Limpa os estados para um novo ciclo
+                                    del st.session_state.bomba_para_coleta
+                                    if 'last_scanned_coleta' in st.session_state:
+                                        del st.session_state.last_scanned_coleta
+                                    st.cache_data.clear()
+                                    st.rerun()
+                                else:
+                                    st.error(f"Erro ao registrar no banco de dados: {response.error}")
+
+                            except Exception as e:
+                                st.error(f"Ocorreu um erro inesperado: {e}")
+                                logging.error(f"Erro detalhado na coleta: {e}")
+                with col2:
+                    if st.button("Cancelar", key="cancelar_coleta"):
+                        del st.session_state.bomba_para_coleta
+                        if 'last_scanned_coleta' in st.session_state:
+                           del st.session_state.last_scanned_coleta
+                        st.rerun()
+            
+            # Se não houver bomba para confirmar, mostra o botão para ativar o leitor
+            else:
+                if st.button("📷 Ativar Leitor de QR Code", key="ativar_scanner"):
+                    st.session_state.scanner_ativo = True
+                    st.rerun()
+
+                if st.session_state.get('scanner_ativo'):
+                    st.subheader("Aponte a câmera para o QR Code")
+                    serial_lido = qrcode_scanner(key='qrcode_coleta')
+
+                    if serial_lido:
+                        # Desativa o scanner assim que algo é lido
+                        st.session_state.scanner_ativo = False
+                        with st.spinner(f"Buscando informações da bomba {serial_lido}..."):
+                            # Busca a bomba ativa
+                            bomba_res = supabase.table("bombas").select("*").eq("serial", serial_lido).eq("ativo", True).execute()
+                            
+                            if not bomba_res.data:
+                                st.error(f"Nenhuma bomba ativa encontrada com o serial '{serial_lido}'.")
+                            else:
+                                bomba_data = bomba_res.data[0]
+                                # Verifica se já não foi coletada
+                                coleta_res = supabase.table("coletas").select("id").eq("bomba_id", bomba_data['id']).eq("status", "COLETADA").execute()
+                                
+                                if coleta_res.data:
+                                    st.warning(f"A bomba '{serial_lido}' já foi coletada e está pendente de entrega.")
+                                else:
+                                    # Adiciona o modelo da bomba usando o dataframe já carregado
+                                    serial_normalizado = normalize_text(bomba_data['serial'])
+                                    modelo_info = dados_bombas_gerais_df[dados_bombas_gerais_df['Serial_Normalized'] == serial_normalizado]
+                                    bomba_data['modelo'] = modelo_info['Modelo'].iloc[0] if not modelo_info.empty else "N/A"
+                                    
+                                    st.session_state.bomba_para_coleta = bomba_data
+                                    st.rerun()
+
+        with tab2:
+            st.subheader("Bombas Coletadas por Você Pendentes de Entrega")
+            
+            if 'coleta_para_validar' in st.session_state:
+                coleta = st.session_state.coleta_para_validar
+                st.warning(f"Para confirmar a entrega, leia o QR Code da bomba com serial **{coleta['serial']}**.")
+                
+                serial_validado = qrcode_scanner(key='qrcode_entrega')
+
+                if serial_validado:
+                    if serial_validado == coleta['serial']:
+                        st.success("✅ Serial validado com sucesso!")
+                        
+                        location_entrega = get_location(prefix="entrega")
+
+                        if st.button("Confirmar Entrega Agora", key=f"confirmar_entrega_{coleta['id']}"):
+                            with st.spinner("Registrando entrega..."):
+                                try:
+                                    update_data = {
+                                        "status": "ENTREGUE",
+                                        "usuario_entrega": st.session_state.user_email,
+                                        "data_entrega": datetime.now().isoformat()
+                                    }
+                                    if location_entrega and location_entrega.get('latitude'):
+                                        update_data['lat_entrega'] = location_entrega['latitude']
+                                        update_data['lon_entrega'] = location_entrega['longitude']
+                                    
+                                    supabase.table("coletas").update(update_data).eq("id", coleta['id']).execute()
+                                    
+                                    register_event("coletas", coleta['bomba_id'], f"ENTREGA DE BOMBA REALIZADA (SERIAL: {coleta['serial']})", filial, st.session_state.user_email)
+                                    flush_events()
+                                    st.session_state.messages.append({"text": "Entrega registrada com sucesso!", "icon": "🚚"})
+                                    del st.session_state.coleta_para_validar
+                                    st.cache_data.clear()
+                                    st.rerun()
+                                except Exception as e:
+                                    st.error(f"Erro ao registrar entrega: {e}")
+                    else:
+                        st.error(f"QR Code inválido! O serial lido ({serial_validado}) não corresponde ao serial da coleta ({coleta['serial']}). Tente novamente.")
+
+                if st.button("Cancelar Validação", key="cancelar_validacao"):
+                    del st.session_state.coleta_para_validar
+                    st.rerun()
+
+            else:
+                with st.spinner("Carregando suas coletas pendentes..."):
+                    coletas_pendentes_res = supabase.table("coletas").select("*").eq("usuario_coleta", st.session_state.user_email).eq("status", "COLETADA").order("data_coleta", desc=True).execute()
+
+                if not coletas_pendentes_res.data:
+                    st.info("Você não possui nenhuma bomba pendente de entrega.")
+                else:
+                    st.write("Selecione a bomba que deseja entregar para validar com o QR Code.")
+                    # Prepara um mapa de bombas ativas para resolver hospital rapidamente (cacheado)
+                    bombas_ativas_map = {b.get('serial'): b for b in get_bombas("", filial, active_only=True)}
+
+                    for coleta in coletas_pendentes_res.data:
+                        data_coleta_dt = parse_supabase_date(coleta.get('data_coleta'))
+                        data_coleta_fmt = data_coleta_dt.strftime("%d/%m/%Y às %H:%M") if data_coleta_dt else "N/A"
+
+                        serial = coleta.get('serial', 'N/A')
+                        # Modelo: busca em dados de manutenção/inventário carregados
+                        serial_normalizado = normalize_text(serial)
+                        modelo = "N/A"
+                        if not dados_bombas_gerais_df.empty:
+                            modelo_info = dados_bombas_gerais_df[dados_bombas_gerais_df['Serial_Normalized'] == serial_normalizado]
+                            modelo = modelo_info['Modelo'].iloc[0] if not modelo_info.empty else "N/A"
+
+                        # Hospital: tenta resolver a partir das bombas ativas (evita chamadas adicionais ao Supabase)
+                        hospital = bombas_ativas_map.get(serial, {}).get('hospital', 'N/A')
+
+                        with st.container(border=True):
+                            st.markdown(f"#### Serial: **{serial}**")
+                            st.write(f"**Modelo:** {modelo}  ")
+                            st.write(f"**Hospital:** {hospital}  ")
+                            st.write(f"**Coletado em:** {data_coleta_fmt}")
+                            if st.button("🚚 Validar Entrega com QR Code", key=f"entregar_{coleta['id']}"):
+                                st.session_state.coleta_para_validar = coleta
+                                st.rerun()
+    # <-- FIM: SEÇÃO DE COLETA COMPLETAMENTE REFEITA -->
+
     elif choice == "Devolver":
         st.markdown('<h2 style="font-size: 1.25rem; margin-bottom: 1rem;">Devolver Bomba</h2>', unsafe_allow_html=True)
-        search_term = st.text_input("Pesquisar bomba para devolver (Serial, Paciente, Hospital)...", key="devolver_search")
+        st.write("Leia o QR Code da bomba que deseja devolver ou use a busca manual abaixo.")
+        serial_lido_devolver = qrcode_scanner(key='qrcode_devolver')
+
+        search_term = st.text_input("Pesquisar bomba para devolver (Serial, Paciente, Hospital)...", key="devolver_search", value=serial_lido_devolver or "")
+        
         bombas_ativas = get_bombas(search_term, filial, active_only=True)
         if not bombas_ativas:
             st.info("Nenhuma bomba ativa encontrada com este critério de busca.")
         else:
             with st.form("devolver_form"):
-                bomba = st.selectbox("Selecione a bomba a devolver:", bombas_ativas, format_func=lambda b: f"SERIAL: {b.get('serial', 'N/A')} | PACIENTE: {b.get('paciente', 'N/A')} | NF: {b.get('nf', 'N/A')}", index=None, placeholder="Selecione uma bomba...")
+                bomba = st.selectbox("Selecione a bomba a devolver:", bombas_ativas, format_func=lambda b: f"SERIAL: {b.get('serial', 'N/A')} | PACIENTE: {b.get('paciente', 'N/A')} | NF: {b.get('nf', 'N/A')}", index=0 if search_term and len(bombas_ativas)==1 else None, placeholder="Selecione uma bomba...")
                 data_retorno = st.date_input("📅 Data de Retorno", value=datetime.now(), format="DD/MM/YYYY")
                 nf_devolucao = st.text_input("🧾 NF de Devolução*", placeholder="Ex.: 987654").upper()
+                
+                location_devolucao = get_location(prefix="devolucao")
+                
                 submitted = st.form_submit_button("Confirmar Devolução")
                 if submitted:
                     if not nf_devolucao or not bomba:
@@ -1079,6 +1337,7 @@ def main():
                                 serial_devolvido = bomba['serial']
                                 nf_map = get_all_nfs_assinadas_info()
                                 nf_assinada_path = get_nf_assinada_filename(serial_devolvido, nf_map)
+                                msg_sucesso = "Bomba devolvida com sucesso!"
                                 if nf_assinada_path:
                                     try:
                                         supabase.storage.from_("controle-de-bombas-suplen-files").remove([nf_assinada_path])
@@ -1086,10 +1345,19 @@ def main():
                                     except Exception as e_storage:
                                         st.warning(f"Atenção: Erro ao remover a NF assinada anterior: {e_storage}")
                                         msg_sucesso = f"Bomba {serial_devolvido} devolvida (com aviso)."
-                                else:
-                                    msg_sucesso = "Bomba devolvida com sucesso!"
-                                supabase.table("bombas").update({"ativo": False, "status": "✅ DEVOLVIDA", "data_retorno": data_retorno.strftime("%Y-%m-%d"), "nf_devolucao": nf_devolucao}).eq("id", bomba["id"]).execute()
-                                register_event("bombas", bomba["id"], f"BOMBA DEVOLVIDA (SERIAL: {bomba['serial']}) NF: {nf_devolucao}", filial)
+                                
+                                update_data = {
+                                    "ativo": False, 
+                                    "status": "✅ DEVOLVIDA", 
+                                    "data_retorno": data_retorno.strftime("%Y-%m-%d"), 
+                                    "nf_devolucao": nf_devolucao
+                                }
+                                if location_devolucao and location_devolucao.get('latitude'):
+                                    update_data['lat_retorno'] = location_devolucao['latitude']
+                                    update_data['lon_retorno'] = location_devolucao['longitude']
+
+                                supabase.table("bombas").update(update_data).eq("id", bomba["id"]).execute()
+                                register_event("bombas", bomba["id"], f"BOMBA DEVOLVIDA (SERIAL: {bomba['serial']}) NF: {nf_devolucao}", filial, st.session_state.user_email)
                                 flush_events()
                                 st.session_state.messages.append({"text": msg_sucesso, "icon": "✅"})
                                 st.cache_data.clear()
@@ -1125,7 +1393,7 @@ def main():
                                 if upload_nf_pdf(serial, data_registro_str, nf_file):
                                     response = supabase.table("manutencao").insert({"serial": serial, "defeito": defeito, "data_registro": datetime.now().strftime("%Y-%m-%d"), "nf_numero": nf_numero, "nf_status": "Enviada", "status": "Em Manutenção", "filial": filial}).execute()
                                     manutencao_id = response.data[0]["id"]
-                                    register_event("manutencao", manutencao_id, f"MANUTENÇÃO REGISTRADA (SERIAL: {serial})", filial)
+                                    register_event("manutencao", manutencao_id, f"MANUTENÇÃO REGISTRADA (SERIAL: {serial})", filial, st.session_state.user_email)
                                     flush_events()
                                     st.session_state.messages.append({"text": "Manutenção registrada!", "icon": "🛠️"})
                                     st.cache_data.clear()
@@ -1168,12 +1436,9 @@ def main():
             if search_term:
                 df_para_exibir = df_para_exibir[df_para_exibir['Desc_Produto'].str.contains(search_term, case=False, na=False)]
             if not df_para_exibir.empty:
-                # Garante que a Data_Validad seja tratada corretamente
                 if 'Data_Validad' in df_para_exibir.columns:
                     df_para_exibir['Data_Validad'] = pd.to_datetime(df_para_exibir['Data_Validad'], errors='coerce')
-                    # Remove duplicatas considerando apenas as colunas que identificam um registro físico único
                     df_para_exibir = df_para_exibir.drop_duplicates(subset=['Produto', 'Desc_Produto', 'Referencia', 'Lote', 'Data_Validad'], keep='last')
-                    # Ordena por data de validade e descrição
                     df_para_exibir = df_para_exibir.sort_values(by=['Data_Validad', 'Desc_Produto'])
                     colunas_exibir = ['Produto', 'Desc_Produto', 'Referencia', 'Lote', 'Data_Validad', 'Saldo_Lote']
                     df_display = df_para_exibir[colunas_exibir].copy()
@@ -1184,7 +1449,6 @@ def main():
                         'Saldo_Lote': 'Saldo do Lote'
                     }, inplace=True)
                 else:
-                    # Se não tem coluna Data_Validad, ordenar só por Desc_Produto
                     df_para_exibir = df_para_exibir.sort_values(by=['Desc_Produto'])
                     colunas_exibir = ['Produto', 'Desc_Produto', 'Referencia', 'Lote', 'Saldo_Lote']
                     df_display = df_para_exibir[colunas_exibir].copy()
@@ -1198,13 +1462,13 @@ def main():
                         hoje = datetime.now()
                         if pd.notna(row['Data de Validade']):
                             diferenca_dias = (row['Data de Validade'] - hoje).days
-                            bg_color = 'background-color: #F08080;'  # Crítico (< 2 meses)
+                            bg_color = 'background-color: #F08080;'
                             if diferenca_dias > 90:
-                                bg_color = 'background-color: #90ee90;'  # Normal
+                                bg_color = 'background-color: #90ee90;'
                             elif 60 <= diferenca_dias <= 90:
-                                bg_color = 'background-color: #FFD580;'  # Atenção
+                                bg_color = 'background-color: #FFD580;'
                             return [f"color: black; {bg_color}"] * len(row)
-                    return [''] * len(row)  # Sem estilo para linhas sem data de validade
+                    return [''] * len(row)
 
                 if 'Data de Validade' in df_display.columns:
                     styler = df_display.style.apply(style_validade, axis=1).format({
@@ -1213,7 +1477,7 @@ def main():
                     })
                 else:
                     styler = df_display.style.format({'Saldo do Lote': '{:.0f}'})
-                    
+                
                 st.dataframe(styler, use_container_width=True, hide_index=True)
                 excel_data = generate_excel_saldo_curativo(styler.data)
                 if excel_data:
