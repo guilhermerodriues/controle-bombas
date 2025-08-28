@@ -5,8 +5,6 @@ import sys
 import logging
 import tempfile
 from datetime import datetime, timedelta, timezone
-import hashlib
-import time
 import pandas as pd
 from io import BytesIO
 from docx import Document
@@ -149,24 +147,6 @@ def init_supabase():
         logging.error(f"Erro ao inicializar Supabase: {e}")
         st.error(f"Erro ao conectar ao Supabase: {e}")
         st.stop()
-    
-
-def safe_rerun():
-    """Try to rerun the Streamlit script in a way compatible across versions."""
-    try:
-        if hasattr(st, 'experimental_rerun'):
-            st.experimental_rerun()
-            return
-    except Exception:
-        pass
-    # Fallback: mutate query params to trigger rerun
-    try:
-        params = st.experimental_get_query_params()
-        params['_rerun'] = [str(int(time.time()))]
-        st.experimental_set_query_params(**params)
-    except Exception:
-        # Last resort: raise to stop execution (will show error)
-        raise
 supabase = init_supabase()
 
 # -------------------- FUNÇÕES AUXILIARES OTIMIZADAS --------------------
@@ -183,47 +163,6 @@ def download_file_from_storage(storage_path):
             return None
         logging.error(f"Erro ao baixar {storage_path}: {str(e)}")
         return None
-
-
-# Autenticação removida: o app roda sem login de usuário; registros usam `st.session_state['user_email']` padrão.
-
-
-def get_location(prefix: str = "local") -> dict | None:
-    """Tenta obter localização automática via streamlit_geolocation(); se não, permite entrada manual.
-
-    Retorna dict com keys 'latitude' e 'longitude' ou None.
-    """
-    try:
-        loc = streamlit_geolocation()
-    except Exception as e:
-        logging.debug(f"streamlit_geolocation falhou: {e}")
-        loc = None
-
-    lat = None
-    lon = None
-    if loc:
-        # tenta várias chaves possíveis
-        lat = loc.get('latitude') or loc.get('lat') or (loc.get('coords') or {}).get('latitude')
-        lon = loc.get('longitude') or loc.get('lon') or (loc.get('coords') or {}).get('longitude')
-
-    if lat and lon:
-        try:
-            lat_val = float(lat)
-            lon_val = float(lon)
-            st.caption(f"Localização detectada automaticamente: {lat_val:.6f}, {lon_val:.6f}")
-            return {"latitude": lat_val, "longitude": lon_val}
-        except Exception:
-            pass
-
-    st.warning("Localização automática não disponível. Selecione manualmente ou permita acesso ao GPS no navegador.")
-    manual_lat = st.text_input(f"Latitude manual ({prefix})", value=str(lat) if lat else "", key=f"manual_lat_{prefix}")
-    manual_lon = st.text_input(f"Longitude manual ({prefix})", value=str(lon) if lon else "", key=f"manual_lon_{prefix}")
-    try:
-        if manual_lat and manual_lon:
-            return {"latitude": float(manual_lat), "longitude": float(manual_lon)}
-    except Exception:
-        st.error("Coordenadas manuais inválidas. Use formato decimal (ex: -15.794229, -47.882166).")
-    return None
 
 @st.cache_data(ttl=300)
 def get_dados_bombas_df():
@@ -716,19 +655,15 @@ def main():
     if 'bomba_edit_key' not in st.session_state:
         st.session_state.bomba_edit_key = 0
 
-    # Autenticação removida: tenta detectar e-mail do usuário via variáveis de ambiente
-    # (útil em ambientes que expõem o usuário autenticado). Caso contrário, usa 'system'.
-    user_email_env = os.getenv('STREAMLIT_USER_EMAIL') or os.getenv('USER_EMAIL') or os.getenv('EMAIL')
-    if user_email_env:
-        st.session_state.user_email = user_email_env
-    else:
-        if 'user_email' not in st.session_state:
-            st.session_state.user_email = 'system'
     filial = setup_filial()
     if not filial and not st.session_state.get("general_mode", False):
         st.sidebar.warning("Por favor, selecione e confirme uma filial para continuar.")
+        return
 
-    # Usuário é determinado por variáveis de ambiente quando disponíveis; caso contrário, 'system'
+    try:
+        st.session_state.user_email = st.user.email
+    except AttributeError:
+        st.session_state.user_email = "local.dev@suplen.com"
 
     if filial:
         st.markdown(f'<p class="filial-main">Filial: {filial}</p>', unsafe_allow_html=True)
@@ -744,14 +679,7 @@ def main():
     menu = ["Dashboard", "Registrar", "Bombas em Comodato", "Coletar / Entregar Bomba", "Devolver", "Manutenção de Bombas", "Histórico Devolvidas", "Saldo Curativo"]
     if st.session_state.get("general_mode", False):
         menu = ["Dashboard Geral"]
-
-    # Mostrar navegação apenas se o usuário estiver logado
-    logged_in = bool(st.session_state.get('user') or (st.session_state.get('user_email') and st.session_state.get('user_email') != 'system'))
-    if logged_in:
-        choice = st.sidebar.selectbox("Navegação", menu, format_func=lambda x: f"📋 {x}")
-    else:
-        st.sidebar.info("Faça login para acessar a navegação.")
-        choice = None
+    choice = st.sidebar.selectbox("Navegação", menu, format_func=lambda x: f"📋 {x}")
 
     if choice == "Dashboard":
         st.markdown('<h2 style="font-size: 1.25rem; margin-bottom: 1rem;">Dashboard da Filial</h2>', unsafe_allow_html=True)
@@ -1122,8 +1050,7 @@ def main():
     # <-- INÍCIO: SEÇÃO DE COLETA COMPLETAMENTE REFEITA -->
     elif choice == "Coletar / Entregar Bomba":
         st.markdown('<h2 style="font-size: 1.25rem; margin-bottom: 1rem;">Coleta e Entrega de Bombas</h2>', unsafe_allow_html=True)
-        nome_usuario = st.session_state.user['nome'] if 'user' in st.session_state and st.session_state.user.get('nome') else st.session_state.user_email
-        st.info(f"Usuário logado: **{nome_usuario}**")
+        st.info(f"Usuário logado: **{st.session_state.user_email}**")
 
         dados_bombas_gerais_df = get_dados_bombas_df()
 
@@ -1146,7 +1073,7 @@ def main():
                     st.markdown(f"**PACIENTE:** `{bomba.get('paciente', 'N/A')}`")
                     st.markdown("---")
                 
-                location_coleta = get_location(prefix="coleta")
+                location_coleta = streamlit_geolocation()
 
                 col1, col2 = st.columns(2)
                 with col1:
@@ -1242,7 +1169,7 @@ def main():
                     if serial_validado == coleta['serial']:
                         st.success("✅ Serial validado com sucesso!")
                         
-                        location_entrega = get_location(prefix="entrega")
+                        location_entrega = streamlit_geolocation()
 
                         if st.button("Confirmar Entrega Agora", key=f"confirmar_entrega_{coleta['id']}"):
                             with st.spinner("Registrando entrega..."):
@@ -1325,7 +1252,7 @@ def main():
                 data_retorno = st.date_input("📅 Data de Retorno", value=datetime.now(), format="DD/MM/YYYY")
                 nf_devolucao = st.text_input("🧾 NF de Devolução*", placeholder="Ex.: 987654").upper()
                 
-                location_devolucao = get_location(prefix="devolucao")
+                location_devolucao = streamlit_geolocation()
                 
                 submitted = st.form_submit_button("Confirmar Devolução")
                 if submitted:
